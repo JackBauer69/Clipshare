@@ -1,0 +1,16 @@
+[Unit]
+Description=Clipboard Share Plasma System Tray
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=30s
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @TRAY_SCRIPT@
+Restart=on-failure
+RestartSec=3s
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=graphical-session.target
