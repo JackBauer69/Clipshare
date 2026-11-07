@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ClipShare
+Comment=Share text and files with devices on your local network
+Exec=/opt/clipshare/ClipShare
+TryExec=/opt/clipshare/ClipShare
+Icon=applications-internet
+Terminal=false
+Categories=Network;Utility;
+StartupNotify=true
