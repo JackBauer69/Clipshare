@@ -12,11 +12,33 @@ import tkinter
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def first_existing(candidates, description):
+def first_existing(candidates, description, fallback=None):
+    """Use the build's own notice, or a version-matched upstream copy."""
     for candidate in candidates:
         if candidate.is_file():
             return candidate
+    if fallback is not None and fallback.is_file():
+        return fallback
     raise SystemExit(f"Could not locate the {description} license from this Python build.")
+
+
+UPSTREAM = ROOT / "packaging/licenses/upstream"
+
+
+def python_license_fallback(version):
+    """The checked-in CPython license is for the 3.12 series only."""
+    if tuple(version[:2]) == (3, 12):
+        return UPSTREAM / "Python-3.12.10-LICENSE.txt"
+    return None
+
+
+def tcltk_license(name, version):
+    """Use each project's own authoritative 8.6 license text."""
+    if str(version) == "8.6":
+        filename = "Tcl-8.6-license.terms" if name == "tcl8.6" else "Tk-8.6-license.terms"
+        return first_existing((), name, UPSTREAM / filename)
+    raise SystemExit(f"Unsupported {name} runtime version {version}; verify its license before packaging.")
+
 
 
 def tcltk_candidates(library, name):
@@ -75,12 +97,14 @@ def main():
     python_license = first_existing(
         (Path(sys.base_prefix) / "LICENSE", stdlib / "LICENSE.txt", stdlib / "LICENSE"),
         "Python",
+        fallback=python_license_fallback(sys.version_info),
     )
     shutil.copy2(python_license, target / "Python-LICENSE.txt")
 
-    library = Path(tkinter.Tcl().eval("info library"))
-    for name in ("tcl8.6", "tk8.6"):
-        license_path = first_existing(tcltk_candidates(library, name), f"{name}")
+    # Tcl and Tk have slightly different notices. Never use Tcl's notice
+    # as a substitute for Tk's (the Tcl library path is shared).
+    for name, version in (("tcl8.6", tkinter.TclVersion), ("tk8.6", tkinter.TkVersion)):
+        license_path = tcltk_license(name, version)
         shutil.copy2(license_path, target / f"{name.upper()}-LICENSE.txt")
 
     copy_pyinstaller_notices(target)
