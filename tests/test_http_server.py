@@ -45,6 +45,21 @@ class ClipShareHTTPTests(unittest.TestCase):
             method="POST",
         )
 
+    def response_to_declared_message_length(self, length):
+        token = next(iter(self.server.state.sessions))
+        connection = HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        try:
+            connection.putrequest("POST", "/messages")
+            connection.putheader("Cookie", f"{clipboard_share.COOKIE_NAME}={token}")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(length))
+            connection.putheader("Connection", "close")
+            connection.endheaders()
+            response = connection.getresponse()
+            return response.status, response.read(), response.headers
+        finally:
+            connection.close()
+
     def join(self):
         status, _body, headers = self.post_json("/auth", {"code": self.server.state.pairing_code.lower()})
         self.assertEqual(status, 200)
@@ -90,24 +105,21 @@ class ClipShareHTTPTests(unittest.TestCase):
         status, _body, _headers = self.post_json("/messages", {"text": ""})
         self.assertEqual(status, 400)
         oversized = "x" * clipboard_share.MAX_MESSAGE_BYTES
-        # The server rejects from Content-Length without consuming an oversized
-        # body. Send only headers so the client does not race the response by
-        # continuing to transmit data on a connection the server will close.
-        token = next(iter(self.server.state.sessions))
-        connection = HTTPConnection("127.0.0.1", self.server.port, timeout=5)
-        try:
-            connection.putrequest("POST", "/messages")
-            connection.putheader("Cookie", f"{clipboard_share.COOKIE_NAME}={token}")
-            connection.putheader("Content-Type", "application/json")
-            connection.putheader("Content-Length", str(len(json.dumps({"text": oversized}).encode("utf-8"))))
-            connection.putheader("Connection", "close")
-            connection.endheaders()
-            response = connection.getresponse()
-            self.assertEqual(response.status, 413)
-            self.assertEqual(response.getheader("Connection"), "close")
-            self.assertIn(b"200 KB max", response.read())
-        finally:
-            connection.close()
+        status, body, _headers = self.post_json("/messages", {"text": oversized})
+        self.assertEqual(status, 413)
+        self.assertIn(b"200 KB max", body)
+
+    def test_far_oversized_message_is_rejected_from_headers(self):
+        self.join()
+        length = (
+            clipboard_share.MAX_MESSAGE_BYTES
+            + clipboard_share.MAX_REJECTED_MESSAGE_DRAIN_BYTES
+            + 1
+        )
+        status, body, headers = self.response_to_declared_message_length(length)
+        self.assertEqual(status, 413)
+        self.assertIn(b"200 KB max", body)
+        self.assertEqual(headers.get("Connection"), "close")
 
     def test_file_upload_download_and_zip_preserve_folder_paths(self):
         self.join()

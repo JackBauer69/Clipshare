@@ -24,6 +24,7 @@ import zipfile
 HOST = "0.0.0.0"
 PORT = 3570
 MAX_MESSAGE_BYTES = 200_000
+MAX_REJECTED_MESSAGE_DRAIN_BYTES = 64 * 1024
 MAX_MESSAGES = 100
 MAX_UPLOAD_BYTES = 3 * 1024 * 1024 * 1024
 MAX_STORED_BYTES = 3 * 1024 * 1024 * 1024
@@ -469,6 +470,28 @@ class Handler(BaseHTTPRequestHandler):
         self.send_body(401, "application/json; charset=utf-8", '{"error":"Enter the session code first."}')
         return False
 
+    def discard_small_rejected_body(self, length):
+        """Drain a small over-limit body to avoid resetting a completed request."""
+        if length > MAX_MESSAGE_BYTES + MAX_REJECTED_MESSAGE_DRAIN_BYTES:
+            return
+        try:
+            self.connection.settimeout(2)
+            remaining = length
+            while remaining:
+                chunk = self.rfile.read(min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            # The request was incomplete or too slow. The 413 still applies;
+            # closing the connection prevents reuse with unread request bytes.
+            pass
+        finally:
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                pass
+
     def do_auth(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -636,6 +659,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_MESSAGE_BYTES:
+            if length > MAX_MESSAGE_BYTES:
+                self.discard_small_rejected_body(length)
             self.close_connection = True
             self.send_body(
                 413,
