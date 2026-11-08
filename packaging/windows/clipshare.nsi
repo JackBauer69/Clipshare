@@ -8,11 +8,11 @@ RequestExecutionLevel user
 !ifndef PROJECT_ROOT
   !define PROJECT_ROOT "../.."
 !endif
-!include "${PROJECT_ROOT}/build/spec/clipshare_uninstall.nsh"
+!include "${PROJECT_ROOT}\\build\\spec\\clipshare_uninstall.nsh"
 
 Name "ClipShare ${APP_VERSION}"
 !ifndef OUTPUT_FILE
-  !define OUTPUT_FILE "${PROJECT_ROOT}/build/artifacts/ClipShare-${APP_VERSION}-windows-x64-setup.exe"
+  !define OUTPUT_FILE "${PROJECT_ROOT}\\build\\artifacts\\ClipShare-${APP_VERSION}-windows-x64-setup.exe"
 !endif
 OutFile "${OUTPUT_FILE}"
 InstallDir "$LOCALAPPDATA\Programs\ClipShare"
@@ -28,7 +28,7 @@ Section "ClipShare application" SEC_APP
   SetShellVarContext current
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File /r "${PROJECT_ROOT}/build/frozen/ClipShare/*"
+  File /r "${PROJECT_ROOT}\\build\\frozen\\ClipShare\\*"
   CreateDirectory "$SMPROGRAMS\ClipShare"
   CreateShortcut "$SMPROGRAMS\ClipShare\ClipShare.lnk" "$INSTDIR\ClipShare.exe"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
