@@ -114,6 +114,7 @@ PAGE = r"""<!doctype html>
   const uploadsList = document.querySelector('#uploads');
   const status = document.querySelector('#status');
   const input = document.querySelector('#text');
+  const MAX_MESSAGE_BYTES = 200000;
   const MAX_FILES_PER_BATCH = 1000;
   let known = '';
   let knownUploads = '';
@@ -223,12 +224,17 @@ PAGE = r"""<!doctype html>
     event.preventDefault();
     const text = input.value;
     if (!text.trim()) { status.textContent = 'Paste some text first.'; return; }
+    const payload = JSON.stringify({ text });
+    if (new TextEncoder().encode(payload).length > MAX_MESSAGE_BYTES) {
+      status.textContent = 'Text is too large (200 KB max).';
+      return;
+    }
     const button = document.querySelector('#send');
     button.disabled = true;
     try {
       const response = await fetch('/messages', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: payload
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not share text.');
@@ -375,6 +381,14 @@ class ShareState:
 class ClipShareHTTPServer(ThreadingHTTPServer):
     daemon_threads = False
     block_on_close = True
+    # On Windows, SO_REUSEADDR permits competing listeners to share a port.
+    # Keep normal address reuse on POSIX for fast restarts.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def __init__(self, address, handler, state):
         self.share_state = state
@@ -622,7 +636,13 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_MESSAGE_BYTES:
-            self.send_body(413, "application/json; charset=utf-8", '{"error":"Text is empty or too large (200 KB max)."}')
+            self.close_connection = True
+            self.send_body(
+                413,
+                "application/json; charset=utf-8",
+                '{"error":"Text is empty or too large (200 KB max)."}',
+                headers=(("Connection", "close"),),
+            )
             return
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -825,7 +845,11 @@ class ShareServer:
         try:
             self.httpd = ClipShareHTTPServer((host, port), Handler, self.state)
         except OSError as error:
-            if port == 0 or (error.errno != errno.EADDRINUSE and getattr(error, "winerror", None) != 10048):
+            windows_conflict = os.name == "nt" and (
+                getattr(error, "winerror", None) in (10013, 10048)
+                or error.errno in (10013, errno.EACCES)
+            )
+            if port == 0 or (error.errno != errno.EADDRINUSE and not windows_conflict):
                 self.temp_storage.cleanup()
                 raise
             try:

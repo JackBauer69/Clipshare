@@ -1,10 +1,12 @@
 from http.cookiejar import CookieJar
+from http.client import HTTPConnection
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import io
 import json
+import os
 import socket
 import tempfile
 import time
@@ -88,8 +90,24 @@ class ClipShareHTTPTests(unittest.TestCase):
         status, _body, _headers = self.post_json("/messages", {"text": ""})
         self.assertEqual(status, 400)
         oversized = "x" * clipboard_share.MAX_MESSAGE_BYTES
-        status, _body, _headers = self.post_json("/messages", {"text": oversized})
-        self.assertEqual(status, 413)
+        # The server rejects from Content-Length without consuming an oversized
+        # body. Send only headers so the client does not race the response by
+        # continuing to transmit data on a connection the server will close.
+        token = next(iter(self.server.state.sessions))
+        connection = HTTPConnection("127.0.0.1", self.server.port, timeout=5)
+        try:
+            connection.putrequest("POST", "/messages")
+            connection.putheader("Cookie", f"{clipboard_share.COOKIE_NAME}={token}")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(len(json.dumps({"text": oversized}).encode("utf-8"))))
+            connection.putheader("Connection", "close")
+            connection.endheaders()
+            response = connection.getresponse()
+            self.assertEqual(response.status, 413)
+            self.assertEqual(response.getheader("Connection"), "close")
+            self.assertIn(b"200 KB max", response.read())
+        finally:
+            connection.close()
 
     def test_file_upload_download_and_zip_preserve_folder_paths(self):
         self.join()
@@ -250,6 +268,19 @@ class ClipShareHTTPTests(unittest.TestCase):
                 alternate.stop()
             occupied.close()
 
+    @unittest.skipUnless(os.name == "nt", "Windows-specific exclusive bind regression")
+    def test_windows_servers_cannot_share_a_listening_port(self):
+        first = clipboard_share.ShareServer(host="127.0.0.1", port=0).start()
+        second = None
+        try:
+            second = clipboard_share.ShareServer(host="127.0.0.1", port=first.port).start()
+            self.assertTrue(second.port_fallback)
+            self.assertNotEqual(second.port, first.port)
+        finally:
+            if second is not None:
+                second.stop()
+            first.stop()
+
     def test_stop_and_restart_creates_a_fresh_temporary_session(self):
         first = clipboard_share.ShareServer(host="127.0.0.1", port=0).start()
         first_storage = Path(first.state.storage_root)
@@ -350,13 +381,18 @@ class SingleInstanceTests(unittest.TestCase):
             path = Path(directory) / "clipshare.lock"
             first = SingleInstanceLock(path)
             second = SingleInstanceLock(path)
-            self.assertTrue(first.acquire())
-            first.write_state({"running": True, "port": 3570})
-            self.assertFalse(second.acquire())
-            self.assertEqual(second.read_state(), {"running": True, "port": 3570})
-            first.release()
-            self.assertTrue(second.acquire())
-            second.release()
+            try:
+                self.assertTrue(first.acquire())
+                self.assertNotEqual(first.state_path, first.path)
+                first.write_state({"running": True, "port": 3570})
+                self.assertTrue(first.state_path.is_file())
+                self.assertFalse(second.acquire())
+                self.assertEqual(second.read_state(), {"running": True, "port": 3570})
+                first.release()
+                self.assertTrue(second.acquire())
+            finally:
+                second.release()
+                first.release()
 
 
 if __name__ == "__main__":

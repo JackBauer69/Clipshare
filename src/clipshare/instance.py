@@ -25,6 +25,9 @@ def lock_path():
 class SingleInstanceLock:
     def __init__(self, path=None):
         self.path = Path(path) if path else lock_path()
+        # State must remain readable through another handle while the lock
+        # byte is held. Windows locks the byte range against reads as well.
+        self.state_path = self.path.with_name(self.path.name + ".state")
         self.file = None
 
     def acquire(self):
@@ -49,21 +52,45 @@ class SingleInstanceLock:
             self.file.close()
             self.file = None
             return False
+        try:
+            # Replace stale state left by an earlier process before startup.
+            self.write_state({"running": False})
+        except OSError:
+            self.release()
+            raise
         return True
 
     def write_state(self, state):
         if self.file is None:
             return
-        self.file.seek(0)
-        self.file.truncate()
-        json.dump(state, self.file)
-        self.file.flush()
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=self.state_path.name + ".",
+            suffix=".tmp",
+            dir=self.state_path.parent,
+        )
+        temporary_path = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as temporary:
+                json.dump(state, temporary)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, self.state_path)
+        finally:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
 
     def read_state(self):
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        # The lock file may contain state from an older ClipShare process.
+        # Prefer the separate state file, which remains readable on Windows.
+        for path in (self.state_path, self.path):
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+        return {}
 
     def release(self):
         if self.file is None:
