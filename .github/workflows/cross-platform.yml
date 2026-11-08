@@ -108,6 +108,7 @@ jobs:
           choco install nsis --yes --no-progress
           $makensis = Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
           if (-not (Test-Path $makensis)) { throw "NSIS compiler was not installed at $makensis" }
+          if (-not (Test-Path "build/spec/clipshare_uninstall.nsh")) { throw "Generated NSIS uninstall manifest is missing." }
           & $makensis "/DAPP_VERSION=$version" "/DPROJECT_ROOT=$env:GITHUB_WORKSPACE" packaging/windows/clipshare.nsi
           if ($LASTEXITCODE -ne 0) { throw "NSIS compilation failed." }
           $installer = "build/artifacts/ClipShare-$version-windows-x64-setup.exe"
