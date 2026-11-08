@@ -29,6 +29,7 @@ MAX_UPLOAD_BYTES = 3 * 1024 * 1024 * 1024
 MAX_STORED_BYTES = 3 * 1024 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_UPLOAD_BATCHES = 50
+MAX_FILES_PER_BATCH = 1000
 MAX_UPLOAD_START_BYTES = 1024 * 1024
 PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 COOKIE_NAME = "clipshare_session"
@@ -97,7 +98,7 @@ PAGE = r"""<!doctype html>
   <div id="status" aria-live="polite"></div>
   <section id="messages" aria-live="polite"></section>
   <h2>Share files or a folder</h2>
-  <div class="sub">Up to 3 GB per upload batch. If your phone browser cannot choose folders, select the files individually or zip the folder first.</div>
+  <div class="sub">Up to 1,000 files and 3 GB per upload batch. If your phone browser cannot choose folders, select the files individually or zip the folder first.</div>
   <div class="file-controls">
     <label class="picker">Choose files
       <input id="filePicker" type="file" multiple>
@@ -113,6 +114,7 @@ PAGE = r"""<!doctype html>
   const uploadsList = document.querySelector('#uploads');
   const status = document.querySelector('#status');
   const input = document.querySelector('#text');
+  const MAX_FILES_PER_BATCH = 1000;
   let known = '';
   let knownUploads = '';
 
@@ -245,6 +247,10 @@ PAGE = r"""<!doctype html>
     const folderPicker = document.querySelector('#folderPicker');
     const selected = [...filePicker.files, ...folderPicker.files];
     if (!selected.length) { status.textContent = 'Choose one or more files or a folder first.'; return; }
+    if (selected.length > MAX_FILES_PER_BATCH) {
+      status.textContent = `A batch can contain at most ${MAX_FILES_PER_BATCH.toLocaleString()} files.`;
+      return;
+    }
     const files = selected.map(file => ({name: file.webkitRelativePath || file.name, size: file.size}));
     const button = document.querySelector('#upload');
     button.disabled = true;
@@ -650,6 +656,13 @@ class Handler(BaseHTTPRequestHandler):
             files = payload.get("files", [])
             if not isinstance(files, list) or not files:
                 raise ValueError
+            if len(files) > MAX_FILES_PER_BATCH:
+                self.send_body(
+                    413,
+                    "application/json; charset=utf-8",
+                    json.dumps({"error": f"An upload batch can contain at most {MAX_FILES_PER_BATCH:,} files."}),
+                )
+                return
             cleaned = []
             seen_names = set()
             for item in files:
@@ -716,6 +729,7 @@ class Handler(BaseHTTPRequestHandler):
                 "total": total,
                 "files": files,
                 "source": self.client_address[0],
+                "write_lock": threading.Lock(),
             }
         self.send_body(201, "application/json; charset=utf-8", json.dumps({"id": batch_id}))
 
@@ -726,20 +740,49 @@ class Handler(BaseHTTPRequestHandler):
         batch_id, index = parts[1], parts[2]
         if index == "finish":
             self.finish_upload(batch_id); return
-        try: index = int(index); offset = int(self.headers.get("X-Chunk-Offset", "-1")); length = int(self.headers.get("Content-Length", "0"))
-        except ValueError: index, offset, length = -1, -1, -1
+        try:
+            index = int(index)
+            offset = int(self.headers.get("X-Chunk-Offset", "-1"))
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            index, offset, length = -1, -1, -1
+
         with self.state.uploads_lock:
             pending = self.state.pending_uploads.get(batch_id)
             if not pending or index < 0 or index >= len(pending["files"]):
-                self.send_body(404, "application/json; charset=utf-8", '{"error":"Upload not found"}'); return
-            item = pending["files"][index]
-            if offset != item["written"] or length <= 0 or length > UPLOAD_CHUNK_BYTES or offset + length > item["size"]:
-                self.send_body(400, "application/json; charset=utf-8", '{"error":"Invalid chunk offset or size"}'); return
-            chunk = self.rfile.read(length)
+                upload_lock = None
+            else:
+                upload_lock = pending["write_lock"]
+        if upload_lock is None:
+            self.send_body(404, "application/json; charset=utf-8", '{"error":"Upload not found"}')
+            return
+
+        # Serialize chunks for this batch, but never hold the session-wide lock
+        # while waiting for bytes from a client.
+        with upload_lock:
+            with self.state.uploads_lock:
+                if self.state.pending_uploads.get(batch_id) is not pending:
+                    self.send_body(404, "application/json; charset=utf-8", '{"error":"Upload not found"}')
+                    return
+                item = pending["files"][index]
+                if (
+                    offset != item["written"]
+                    or length <= 0
+                    or length > UPLOAD_CHUNK_BYTES
+                    or offset + length > item["size"]
+                ):
+                    self.send_body(400, "application/json; charset=utf-8", '{"error":"Invalid chunk offset or size"}')
+                    return
+                dest = os.path.join(self.state.storage_root, batch_id, item["id"])
+
+            try:
+                chunk = self.rfile.read(length)
+            except OSError:
+                self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload connection ended before the chunk arrived."}')
+                return
             if len(chunk) != length:
                 self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload chunk was incomplete; start the upload again."}')
                 return
-            dest = os.path.join(self.state.storage_root, batch_id, item["id"])
             try:
                 with open(dest, "ab") as out:
                     out.write(chunk)
@@ -752,12 +795,21 @@ class Handler(BaseHTTPRequestHandler):
     def finish_upload(self, batch_id):
         with self.state.uploads_lock:
             pending = self.state.pending_uploads.get(batch_id)
-            if not pending or any(f["written"] != f["size"] for f in pending["files"]):
-                self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload is incomplete"}'); return
-            files = [{k: f[k] for k in ("id", "path", "size")} for f in pending["files"]]
-            self.state.upload_batches.append({"id": batch_id, "time": datetime.now().astimezone().strftime("%H:%M:%S"), "source": pending["source"], "files": files})
-            self.state.stored_bytes += pending["total"]
-            del self.state.pending_uploads[batch_id]
+            upload_lock = pending["write_lock"] if pending else None
+        if upload_lock is None:
+            self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload is incomplete"}')
+            return
+
+        with upload_lock:
+            with self.state.uploads_lock:
+                pending = self.state.pending_uploads.get(batch_id)
+                if not pending or any(f["written"] != f["size"] for f in pending["files"]):
+                    self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload is incomplete"}')
+                    return
+                files = [{k: f[k] for k in ("id", "path", "size")} for f in pending["files"]]
+                self.state.upload_batches.append({"id": batch_id, "time": datetime.now().astimezone().strftime("%H:%M:%S"), "source": pending["source"], "files": files})
+                self.state.stored_bytes += pending["total"]
+                del self.state.pending_uploads[batch_id]
         self.send_body(201, "application/json; charset=utf-8", '{"ok":true}')
 
 
@@ -803,14 +855,12 @@ class ShareServer:
         with self._stop_lock:
             if self._stopped:
                 return
-            self._stopped = True
-        try:
             if self.thread is not None and self.thread.is_alive():
                 self.httpd.shutdown()
                 self.thread.join()
             self.httpd.server_close()
-        finally:
             self.temp_storage.cleanup()
+            self._stopped = True
 
 
 def main():

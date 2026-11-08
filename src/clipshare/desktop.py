@@ -176,15 +176,19 @@ class ClipShareApp:
                     self.quit_after_stop = False
                     self.set_state(False)
                 elif event == "stop-error":
-                    self.session = None
-                    self.instance_lock.write_state({"running": False})
                     self.busy = False
-                    self.local_url_var.set("")
-                    self.lan_url_var.set("")
-                    self.code_var.set("")
-                    self.status_var.set("Sharing stopped with a cleanup error")
-                    messagebox.showerror("ClipShare shutdown error", str(detail), parent=self.root)
-                    self.set_state(False)
+                    self.quit_after_stop = False
+                    self.status_var.set(
+                        "ClipShare could not confirm shutdown. Sharing may still be running; retry Stop sharing."
+                    )
+                    messagebox.showerror(
+                        "Could not stop ClipShare",
+                        "ClipShare could not confirm that sharing stopped. The session is still tracked. "
+                        "Use Stop sharing to retry shutdown.\n\n"
+                        f"{detail}",
+                        parent=self.root,
+                    )
+                    self.set_state(self.session is not None)
         except queue.Empty:
             pass
         if self.root.winfo_exists():

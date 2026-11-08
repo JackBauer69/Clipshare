@@ -9,10 +9,6 @@ Source0:        clipshare-bundle.tar.gz
 Source1:        clipshare.desktop
 BuildArch:      x86_64
 Requires:       glibc >= 2.35
-Requires:       libX11
-Requires:       libXext
-Requires:       libXft
-Requires:       libXrender
 
 %description
 ClipShare shares text, files, and folders between devices on a trusted local

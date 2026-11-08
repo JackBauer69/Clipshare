@@ -32,6 +32,8 @@ Closing the browser does not stop sharing; the control window stays open so you 
 
 The session code is generated for each start. A device enters it once; ClipShare then uses a temporary browser cookie to authorize that session. The code and session data stay on the host. There are no accounts, cloud storage, analytics, or external services required after installation.
 
+Each file or folder upload batch can contain up to 1,000 files and 3 GB of data.
+
 ClipShare uses plain HTTP on the local network. Pairing helps prevent casual access by other devices, but it does not encrypt traffic or protect against someone who can monitor or alter an untrusted network. Use ClipShare only on a network you trust. Anyone with network access to the host and session access can view shared content. Your computer's firewall or network settings may need to allow local-network connections; ClipShare does not change firewall rules. Guest Wi-Fi isolation may prevent devices from reaching each other.
 
 Messages are held in memory. Uploaded files are held in temporary storage outside the installation directory. **Stopping or quitting ClipShare deletes the messages and uploaded files for that session.** In-progress uploads are temporary too. The application does not make a permanent archive.

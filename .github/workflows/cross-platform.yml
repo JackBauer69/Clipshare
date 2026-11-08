@@ -35,6 +35,16 @@ jobs:
         env:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -v
+      - name: Install headless Tk test dependencies
+        if: matrix.name == 'Ubuntu x64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb python3-tk
+      - name: Smoke-test the real desktop window under Xvfb
+        if: matrix.name == 'Ubuntu x64'
+        env:
+          PYTHONPATH: src
+        run: xvfb-run -a /usr/bin/python3 tests/gui_smoke.py
       - name: Compile Python modules
         run: python -m compileall -q src scripts tests
 
@@ -70,7 +80,9 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip python3-venv python3-tk rpm libx11-6 libxext6 libxft2 libxrender1 libxss1
+          sudo apt-get install -y python3-pip python3-venv python3-tk rpm binutils libx11-6 libxext6 libxft2 libxrender1 libxss1
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 10), sys.version'
+          ldd --version | head -n1
           python3 -m venv .build-venv
           .build-venv/bin/python -m pip install -r requirements-build.txt
       - name: Set up Python for Windows and macOS builds
@@ -165,10 +177,20 @@ jobs:
           CLIPSHARE_MAINTAINER: ${{ vars.CLIPSHARE_MAINTAINER }}
         run: |
           .build-venv/bin/python scripts/build_app.py
+          .build-venv/bin/python scripts/check_linux_glibc.py build/frozen/ClipShare --maximum 2.35
           .build-venv/bin/python scripts/package_linux.py
           temp_dir="$(mktemp -d)"
           dpkg-deb -x build/artifacts/*.deb "$temp_dir/deb"
           "$temp_dir/deb/opt/clipshare/ClipShare" --self-test
+          rpm_file="$(find build/artifacts -maxdepth 1 -name 'clipshare-*.rpm' -print -quit)"
+          mkdir -p "$RUNNER_TEMP/clipshare-rpmdb"
+          rpm --dbpath "$RUNNER_TEMP/clipshare-rpmdb" -qp --requires "$rpm_file" > "$RUNNER_TEMP/clipshare-rpm-requires"
+          rpm --dbpath "$RUNNER_TEMP/clipshare-rpmdb" -qp --provides "$rpm_file" > "$RUNNER_TEMP/clipshare-rpm-provides"
+          grep -Fx 'libxcb.so.1()(64bit)' "$RUNNER_TEMP/clipshare-rpm-requires"
+          for capability in 'libX11.so.6()(64bit)' 'libXext.so.6()(64bit)' 'libXft.so.2()(64bit)' 'libXrender.so.1()(64bit)' 'libXss.so.1()(64bit)' 'libfontconfig.so.1()(64bit)' 'libfreetype.so.6()(64bit)' 'libtcl8.6.so()(64bit)' 'libtk8.6.so()(64bit)'; do
+            grep -Fx "$capability" "$RUNNER_TEMP/clipshare-rpm-requires"
+            grep -Fx "$capability" "$RUNNER_TEMP/clipshare-rpm-provides"
+          done
           docker run --rm -v "$PWD/build/artifacts:/packages:ro" fedora:45 bash -lc 'dnf -y install /packages/clipshare-*.rpm && /opt/clipshare/ClipShare --self-test'
           rm -rf "$temp_dir"
       - name: Record Windows signing state

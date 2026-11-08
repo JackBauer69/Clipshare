@@ -2,10 +2,12 @@ from http.cookiejar import CookieJar
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import io
 import json
 import socket
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -172,6 +174,26 @@ class ClipShareHTTPTests(unittest.TestCase):
             )
             self.assertEqual(status, 413)
 
+    def test_file_count_limit_includes_empty_files_and_cleans_up(self):
+        self.join()
+        storage_root = Path(self.server.state.storage_root)
+        files = [{"name": f"empty-{index}.txt", "size": 0} for index in range(clipboard_share.MAX_FILES_PER_BATCH)]
+        status, body, _headers = self.post_json("/upload/start", {"files": files})
+        self.assertEqual(status, 201)
+        batch_id = json.loads(body)["id"]
+        batch_directory = storage_root / batch_id
+        self.assertEqual(len(list(batch_directory.iterdir())), clipboard_share.MAX_FILES_PER_BATCH)
+
+        excessive_files = files + [{"name": "one-too-many.txt", "size": 0}]
+        status, body, _headers = self.post_json("/upload/start", {"files": excessive_files})
+        self.assertEqual(status, 413)
+        self.assertIn(b"at most 1,000 files", body)
+        self.assertEqual(list(storage_root.iterdir()), [batch_directory])
+        self.assertEqual(len(self.server.state.pending_uploads), 1)
+
+        self.server.stop()
+        self.assertFalse(storage_root.exists())
+
     def test_empty_file_and_invalid_chunk_offsets(self):
         self.join()
         status, body, _headers = self.post_json(
@@ -243,6 +265,83 @@ class ClipShareHTTPTests(unittest.TestCase):
                 self.assertIn(b"Join ClipShare", response.read())
         finally:
             second.stop()
+
+    def test_server_stop_failure_can_be_retried(self):
+        session = clipboard_share.ShareServer(host="127.0.0.1", port=0).start()
+        original_shutdown = session.httpd.shutdown
+        try:
+            with patch.object(
+                session.httpd,
+                "shutdown",
+                side_effect=[RuntimeError("simulated listener shutdown failure"), original_shutdown],
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated listener shutdown failure"):
+                    session.stop()
+            self.assertFalse(session._stopped)
+            self.assertTrue(session.thread.is_alive())
+            session.stop()
+            self.assertTrue(session._stopped)
+            self.assertFalse(session.thread.is_alive())
+        finally:
+            if not session._stopped:
+                session.stop()
+
+    def test_slow_chunk_does_not_block_an_unrelated_upload_batch(self):
+        self.join()
+        batch_ids = []
+        for name in ("slow.bin", "other.bin"):
+            status, body, _headers = self.post_json(
+                "/upload/start", {"files": [{"name": name, "size": 1}]}
+            )
+            self.assertEqual(status, 201)
+            batch_ids.append(json.loads(body)["id"])
+
+        token = next(iter(self.server.state.sessions))
+        with socket.create_connection(("127.0.0.1", self.server.port), timeout=5) as stalled_client:
+            stalled_client.settimeout(5)
+            stalled_client.sendall(
+                (
+                    f"POST /upload/{batch_ids[0]}/0 HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{self.server.port}\r\n"
+                    f"Cookie: {clipboard_share.COOKIE_NAME}={token}\r\n"
+                    "Content-Type: application/octet-stream\r\n"
+                    "X-Chunk-Offset: 0\r\n"
+                    "Content-Length: 1\r\n"
+                    "Connection: close\r\n\r\n"
+                ).encode("ascii")
+            )
+
+            started = time.monotonic()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                other_chunk = executor.submit(
+                    self.request,
+                    f"/upload/{batch_ids[1]}/0",
+                    b"B",
+                    {"Content-Type": "application/octet-stream", "X-Chunk-Offset": "0"},
+                    "POST",
+                )
+                try:
+                    status, _body, _headers = other_chunk.result(timeout=5)
+                except FutureTimeoutError:
+                    stalled_client.sendall(b"A")
+                    while stalled_client.recv(4096):
+                        pass
+                    self.fail("A slow upload chunk blocked an unrelated batch.")
+            self.assertEqual(status, 200)
+            self.assertLess(time.monotonic() - started, 5)
+
+            stalled_client.sendall(b"A")
+            first_response = bytearray()
+            while True:
+                chunk = stalled_client.recv(4096)
+                if not chunk:
+                    break
+                first_response.extend(chunk)
+            self.assertIn(b" 200 ", first_response.split(b"\r\n", 1)[0])
+
+        for batch_id in batch_ids:
+            status, _body, _headers = self.request(f"/upload/{batch_id}/finish", data=b"", method="POST")
+            self.assertEqual(status, 201)
 
 
 class SingleInstanceTests(unittest.TestCase):

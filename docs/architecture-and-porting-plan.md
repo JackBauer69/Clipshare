@@ -49,7 +49,7 @@ This is the intended first-release matrix, not a claim of completed OS validatio
 | Debian family | `clipshare_<version>_amd64.deb` | Debian 12+, Ubuntu 22.04+, x86-64 |
 | Fedora family | `clipshare-<version>-1.x86_64.rpm` | Fedora 45+, x86-64 |
 
-Windows and macOS installer execution, older OS compatibility, and Linux package installation must be verified on the target systems before calling these supported releases. Linux binaries are built on Ubuntu 22.04 to keep their glibc baseline compatible with the stated minimum. The macOS deployment target is 15.0; runner and Python versions will be pinned so the build does not silently raise the minimum.
+Windows and macOS installer execution, older OS compatibility, and Linux package installation must be verified on the target systems before calling these supported releases. Linux binaries are built on Ubuntu 22.04 system Python 3.10 to keep their GLIBC baseline compatible with the stated minimum. CI inspects bundled ELF objects, rejects GLIBC requirements newer than 2.35, and runs the packaged Debian executable on the Ubuntu 22.04 build runner. The macOS deployment target is 15.0; runner and Python versions will be pinned so the build does not silently raise the minimum.
 
 ## Network security and privacy
 
@@ -59,7 +59,7 @@ This protects against accidental access by other LAN users, but not an observer 
 
 Upload handling will reject absolute paths, traversal components, Windows drive paths, Windows-reserved path components, duplicate archive paths, invalid sizes, excessive JSON request sizes, and out-of-order/oversized chunks. Random server-generated IDs, rather than client filenames, select disk paths. ZIP members use only validated relative names. Downloads stream to the response instead of loading a whole file into memory.
 
-The existing 100-message/200 KB-per-message and 8 MiB chunk/3 GiB storage limits remain. A session may retain at most 50 upload batches, including uploads in progress, to bound metadata and per-file request overhead; empty files remain valid. The pairing code has 60 bits of randomness, and failed attempts are rate-limited per client address.
+The existing 100-message/200 KB-per-message and 8 MiB chunk/3 GiB storage limits remain. A session may retain at most 50 upload batches, including uploads in progress. Each batch may contain at most 1,000 files, including empty files; this bounds file metadata and empty-file creation overhead while retaining folder and multi-file uploads. The pairing code has 60 bits of randomness, and failed attempts are rate-limited per client address.
 
 ## Migration sequence
 

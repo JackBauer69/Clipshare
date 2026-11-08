@@ -8,11 +8,11 @@ Stop/Quit closes the listener and removes that session's temporary files. Closin
 
 The session pairing code is generated on each Start and displayed only in the control window. Each browser, including the host's, exchanges the code once for a random host-only `HttpOnly`, `SameSite=Strict` cookie. Content and upload/download endpoints require an authorized cookie. Pairing attempts are rate-limited by client address. The listener still uses plain HTTP on the LAN; use it only on trusted networks. There are no cloud services, telemetry, or third-party runtime APIs.
 
-The original limits are retained: 100 text entries at up to 200 KB each, 8 MiB upload chunks, 3 GiB per batch and total temporary storage. A session may retain up to 50 upload batches, including uploads in progress. Windows-reserved path components and duplicate archive paths are rejected so ZIP downloads remain safe to extract across platforms. Empty files are supported. Text and uploaded files are removed on Stop/Quit.
+The original limits are retained: 100 text entries at up to 200 KB each, 8 MiB upload chunks, 3 GiB per batch and total temporary storage. A session may retain up to 50 upload batches, including uploads in progress; each batch is limited to 1,000 files, including empty files. Windows-reserved path components and duplicate archive paths are rejected so ZIP downloads remain safe to extract across platforms. Text and uploaded files are removed on Stop/Quit.
 
 ## Local development and tests
 
-Use Python 3.12 for parity with CI. Tkinter must be available in the Python installation.
+The cross-platform test matrix uses Python 3.12. Tkinter must be available in the Python installation. Linux package builds intentionally use Ubuntu 22.04's system Python 3.10 and system Tcl/Tk so the frozen libraries match the oldest supported glibc baseline.
 
 From the repository root:
 
@@ -24,7 +24,7 @@ python -m compileall -q src scripts tests
 PYTHONPATH=src python scripts/clipboard_share.py --version
 ```
 
-The HTTP tests bind loopback sockets and create temporary files. They do not require Internet access or a real LAN. On headless Linux, run the GUI smoke check under a virtual X server such as Xvfb; the normal self-test exercises the Tcl runtime and HTTP server without displaying a window.
+The HTTP tests bind loopback sockets and create temporary files. They do not require Internet access or a real LAN. Linux CI also runs `tests/gui_smoke.py` with Ubuntu 22.04's system Python 3.10 and Xvfb to open and operate the actual Tk window. Windows and macOS CI run the platform-neutral tests but do not run an actual Tk window smoke test. The packaged `--self-test` exercises Tcl and HTTP without displaying a window.
 
 ## Native application builds
 
@@ -53,18 +53,26 @@ Build on the target native macOS architecture and run `sh packaging/macos/build_
 
 ### Linux packages
 
-Build on Ubuntu 22.04 x86-64 so the frozen app uses the intended glibc baseline. Install `dpkg-deb`, `rpmbuild`, and the Tk/X11 development/runtime libraries needed by PyInstaller, then run:
+Build on Ubuntu 22.04 x86-64 with its system Python 3.10.x so the frozen app and bundled Tcl/Tk use the intended glibc baseline. Install `dpkg-deb`, `rpmbuild`, `binutils`, and the Tk/X11 development/runtime libraries needed by PyInstaller, then run:
 
 ```sh
-python scripts/build_app.py
-python scripts/package_linux.py
+python3 --version
+python3 -m venv .build-venv
+.build-venv/bin/python -m pip install -r requirements-build.txt
+.build-venv/bin/python scripts/build_app.py
+.build-venv/bin/python scripts/check_linux_glibc.py build/frozen/ClipShare --maximum 2.35
+.build-venv/bin/python scripts/package_linux.py
 ```
 
-This produces a Debian `.deb` and Fedora-family `.rpm` under `build/artifacts/`. The desktop entry starts `/opt/clipshare/ClipShare`; package managers own installation and removal. AppImage is not part of the first artifact set.
+This produces a Debian `.deb` and Fedora-family `.rpm` under `build/artifacts/`. CI checks the extracted Debian executable on the Ubuntu 22.04 runner that built it, then installs the RPM in a Fedora 45 container and runs its self-test. The desktop entry starts `/opt/clipshare/ClipShare`; package managers own installation and removal. AppImage is not part of the first artifact set.
+
+PyInstaller includes Tcl/Tk and other native libraries from its build host. The compatibility check inspects every ELF object's GLIBC version requirements and rejects anything newer than 2.35. A developer build made on this Kali host with Python 3.14 and glibc 2.43 has a bundled `libtcl8.6.so` requiring `GLIBC_2.42`; it is not a Debian 12/Ubuntu 22.04 distribution artifact and must not be used to infer support for those targets. Do not build release Linux packages on a newer host and compensate by changing package metadata.
+
+RPM requirements were inspected with `rpm -qp --requires` and `--provides`. The PyInstaller bundle provides its own versioned X11, Xss, Tcl/Tk, fontconfig, and freetype libraries; RPM's ELF scanner also records those library requirements, which the same package satisfies. `libxcb.so.1` is not bundled and remains an automatic host dependency. Explicit package-name requirements for bundled `libX11`, `libXext`, `libXft`, and `libXrender` were removed. CI asserts the bundled libraries are both required and provided by the RPM, confirms the external `libxcb.so.1` requirement, and installs the package in Fedora 45. That Fedora transaction has not been run locally.
 
 ## CI and release workflow
 
-`.github/workflows/cross-platform.yml` runs the tests on Windows x64, Ubuntu 22.04 x64, macOS 15 Intel, and macOS 15 Apple Silicon. It builds artifacts on native runners, smoke-tests the installed Windows app and Linux packages, and uploads build artifacts for review. The current local session cannot run hosted GitHub Actions; configured native jobs are not evidence that those OS builds have passed until the workflow runs.
+`.github/workflows/cross-platform.yml` runs the tests on Windows x64, Ubuntu 22.04 x64, macOS 15 Intel, and macOS 15 Apple Silicon using Python 3.12. Linux package creation is a deliberate exception: on Ubuntu 22.04 it uses system Python 3.10 and system Tcl/Tk, enforces a GLIBC 2.35 maximum, and smoke-tests the extracted `.deb` on that baseline. It also installs and smoke-tests the `.rpm` in Fedora 45. Windows and macOS use native Python 3.12 builds. The current local session cannot run hosted GitHub Actions; configured native jobs are not evidence that those OS builds have passed until the workflow runs.
 
 A tag matching the package version (`v0.1.0` for the current version) triggers a release job. The release job requires an owner-selected `LICENSE` file, a public `CLIPSHARE_MAINTAINER` repository variable in the form `ClipShare Team <team@example.org>`, and signed/notarized macOS packages; it fails without them. The owner must choose and add a license for the ClipShare source before publishing because GitHub also exposes source archives for releases. Do not create or push a tag as part of ordinary development.
 
