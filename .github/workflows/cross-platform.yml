@@ -108,6 +108,7 @@ jobs:
           choco install nsis --yes --no-progress
           $makensis = Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
           if (-not (Test-Path $makensis)) { throw "NSIS compiler was not installed at $makensis" }
+          if (-not (Test-Path "build/spec/clipshare_uninstall.nsh")) { throw "Generated NSIS uninstall manifest is missing." }
           & $makensis "/DAPP_VERSION=$version" "/DPROJECT_ROOT=$env:GITHUB_WORKSPACE" packaging/windows/clipshare.nsi
           if ($LASTEXITCODE -ne 0) { throw "NSIS compilation failed." }
           $installer = "build/artifacts/ClipShare-$version-windows-x64-setup.exe"
@@ -125,10 +126,25 @@ jobs:
           $installPath = Join-Path $env:RUNNER_TEMP "ClipShare Smoke Test"
           $install = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$installPath") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "NSIS installation failed: $($install.ExitCode)" }
-          & "$installPath\ClipShare.exe" --self-test
-          if ($LASTEXITCODE -ne 0) { throw "Installed Windows app self-test failed." }
+          $installedApp = Join-Path $installPath "ClipShare.exe"
+          $appTest = Start-Process -FilePath $installedApp -ArgumentList "--self-test" -Wait -PassThru
+          Write-Host "Installed Windows app self-test exit code: $($appTest.ExitCode)"
+          if ($appTest.ExitCode -ne 0) { throw "Installed Windows app self-test failed: $($appTest.ExitCode)" }
           $uninstall = Start-Process -FilePath "$installPath\Uninstall.exe" -ArgumentList "/S" -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0 -or (Test-Path $installPath)) { throw "Windows uninstall smoke test failed." }
+          Write-Host "Uninstaller exit code: $($uninstall.ExitCode)"
+          # NSIS uninstaller may briefly retain its executable while the helper exits.
+          # Give Windows a bounded interval to finish removing the installation directory.
+          for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath $installPath); $attempt++) {
+            Start-Sleep -Milliseconds 500
+          }
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path -LiteralPath $installPath)) {
+            if (Test-Path -LiteralPath $installPath) {
+              Write-Host "Files remaining after uninstall:"
+              Get-ChildItem -LiteralPath $installPath -Force -Recurse -ErrorAction Continue |
+                Select-Object -ExpandProperty FullName | Select-Object -First 100 | ForEach-Object { Write-Host $_ }
+            }
+            throw "Windows uninstall smoke test failed: exit code $($uninstall.ExitCode), installation directory exists: $(Test-Path -LiteralPath $installPath)"
+          }
       - name: Prepare macOS signing keychain
         if: matrix.platform == 'macos'
         shell: bash
@@ -201,7 +217,8 @@ jobs:
         run: |
           $version = python -c "import sys; sys.path.insert(0, 'src'); from clipshare import __version__; print(__version__)"
           $installer = "build/artifacts/ClipShare-$version-windows-x64-setup.exe"
-          if ($env:WINDOWS_CERTIFICATE_PFX_BASE64) { "SIGNED=true" } else { "SIGNED=false" } | Out-File "$installer.signing.txt"
+          $signingState = if ($env:WINDOWS_CERTIFICATE_PFX_BASE64) { "SIGNED=true" } else { "SIGNED=false" }
+          $signingState | Out-File "$installer.signing.txt"
       - name: Upload platform artifact
         uses: actions/upload-artifact@v7
         with:
