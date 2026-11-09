@@ -129,7 +129,20 @@ jobs:
           & "$installPath\ClipShare.exe" --self-test
           if ($LASTEXITCODE -ne 0) { throw "Installed Windows app self-test failed." }
           $uninstall = Start-Process -FilePath "$installPath\Uninstall.exe" -ArgumentList "/S" -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0 -or (Test-Path $installPath)) { throw "Windows uninstall smoke test failed." }
+          Write-Host "Uninstaller exit code: $($uninstall.ExitCode)"
+          # NSIS uninstaller may briefly retain its executable while the helper exits.
+          # Give Windows a bounded interval to finish removing the installation directory.
+          for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath $installPath); $attempt++) {
+            Start-Sleep -Milliseconds 500
+          }
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path -LiteralPath $installPath)) {
+            if (Test-Path -LiteralPath $installPath) {
+              Write-Host "Files remaining after uninstall:"
+              Get-ChildItem -LiteralPath $installPath -Force -Recurse -ErrorAction Continue |
+                Select-Object -ExpandProperty FullName | Select-Object -First 100 | ForEach-Object { Write-Host $_ }
+            }
+            throw "Windows uninstall smoke test failed: exit code $($uninstall.ExitCode), installation directory exists: $(Test-Path -LiteralPath $installPath)"
+          }
       - name: Prepare macOS signing keychain
         if: matrix.platform == 'macos'
         shell: bash
