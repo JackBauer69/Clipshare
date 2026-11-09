@@ -126,8 +126,10 @@ jobs:
           $installPath = Join-Path $env:RUNNER_TEMP "ClipShare Smoke Test"
           $install = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$installPath") -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "NSIS installation failed: $($install.ExitCode)" }
-          & "$installPath\ClipShare.exe" --self-test
-          if ($LASTEXITCODE -ne 0) { throw "Installed Windows app self-test failed." }
+          $installedApp = Join-Path $installPath "ClipShare.exe"
+          $appTest = Start-Process -FilePath $installedApp -ArgumentList "--self-test" -Wait -PassThru
+          Write-Host "Installed Windows app self-test exit code: $($appTest.ExitCode)"
+          if ($appTest.ExitCode -ne 0) { throw "Installed Windows app self-test failed: $($appTest.ExitCode)" }
           $uninstall = Start-Process -FilePath "$installPath\Uninstall.exe" -ArgumentList "/S" -Wait -PassThru
           Write-Host "Uninstaller exit code: $($uninstall.ExitCode)"
           # NSIS uninstaller may briefly retain its executable while the helper exits.
