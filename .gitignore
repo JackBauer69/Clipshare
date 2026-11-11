@@ -4,6 +4,10 @@ __pycache__/
 *.tmp
 .venv/
 venv/
+build/
+dist/
+artifacts/
+*.egg-info/
 .env
 .env.*
 !.env.example

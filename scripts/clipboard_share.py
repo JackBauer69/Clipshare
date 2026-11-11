@@ -2,8 +2,14 @@
 """Launch ClipShare directly from a source checkout."""
 
 from pathlib import Path
-import runpy
+import sys
 
 
-APPLICATION = Path(__file__).resolve().parents[1] / "src/clipshare/clipboard_share.py"
-runpy.run_path(str(APPLICATION), run_name="__main__")
+SOURCE = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(SOURCE))
+
+from clipshare.launcher import main
+
+
+if __name__ == "__main__":
+    main()

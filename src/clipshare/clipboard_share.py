@@ -2,15 +2,20 @@
 """A tiny LAN clipboard text-sharing page. Run with: python3 clipboard_share.py"""
 
 from datetime import datetime
+import errno
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import http.cookies
 import json
 import os
 from pathlib import PurePosixPath
+import re
+import secrets
 import shutil
-import signal
 import socket
 import tempfile
 import threading
+import time
 from urllib.parse import quote, unquote, urlparse
 import uuid
 import zipfile
@@ -19,18 +24,24 @@ import zipfile
 HOST = "0.0.0.0"
 PORT = 3570
 MAX_MESSAGE_BYTES = 200_000
+MAX_REJECTED_MESSAGE_DRAIN_BYTES = 64 * 1024
 MAX_MESSAGES = 100
 MAX_UPLOAD_BYTES = 3 * 1024 * 1024 * 1024
 MAX_STORED_BYTES = 3 * 1024 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_UPLOAD_BATCHES = 50
-messages = []
-messages_lock = threading.Lock()
-upload_batches = []
-uploads_lock = threading.Lock()
-storage_root = None
-pending_uploads = {}
-stored_bytes = 0
+MAX_FILES_PER_BATCH = 1000
+MAX_UPLOAD_START_BYTES = 1024 * 1024
+PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+COOKIE_NAME = "clipshare_session"
+AUTH_ATTEMPT_WINDOW = 600
+AUTH_ATTEMPT_LIMIT = 10
+MAX_SESSIONS = 256
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 
 PAGE = r"""<!doctype html>
@@ -39,7 +50,7 @@ PAGE = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f5f5f4">
-  <title>Clipboard Share</title>
+  <title>ClipShare</title>
   <style>
     :root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; }
     body { margin: 0 auto; padding: 20px 14px; max-width: 760px; background: #f5f5f4; color: #202124; }
@@ -78,8 +89,9 @@ PAGE = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <h1>Clipboard Share</h1>
-  <div class="sub">Paste text below to share it with this PC and other devices on your Wi-Fi.</div>
+  <h1>ClipShare</h1>
+  <div class="sub">Paste text below to share it with this PC and other devices on your local network.</div>
+  <div class="sub">Only people with the session code shown in the ClipShare app can join. Use this on a trusted network; traffic is not encrypted.</div>
   <form id="form">
     <textarea id="text" placeholder="Paste or type text here…" autofocus></textarea>
     <button class="send" id="send" type="submit">Share text</button>
@@ -87,7 +99,7 @@ PAGE = r"""<!doctype html>
   <div id="status" aria-live="polite"></div>
   <section id="messages" aria-live="polite"></section>
   <h2>Share files or a folder</h2>
-  <div class="sub">Up to 3 GB per upload batch. If your phone browser cannot choose folders, select the files individually or zip the folder first.</div>
+  <div class="sub">Up to 1,000 files and 3 GB per upload batch. If your phone browser cannot choose folders, select the files individually or zip the folder first.</div>
   <div class="file-controls">
     <label class="picker">Choose files
       <input id="filePicker" type="file" multiple>
@@ -103,6 +115,8 @@ PAGE = r"""<!doctype html>
   const uploadsList = document.querySelector('#uploads');
   const status = document.querySelector('#status');
   const input = document.querySelector('#text');
+  const MAX_MESSAGE_BYTES = 200000;
+  const MAX_FILES_PER_BATCH = 1000;
   let known = '';
   let knownUploads = '';
 
@@ -211,12 +225,17 @@ PAGE = r"""<!doctype html>
     event.preventDefault();
     const text = input.value;
     if (!text.trim()) { status.textContent = 'Paste some text first.'; return; }
+    const payload = JSON.stringify({ text });
+    if (new TextEncoder().encode(payload).length > MAX_MESSAGE_BYTES) {
+      status.textContent = 'Text is too large (200 KB max).';
+      return;
+    }
     const button = document.querySelector('#send');
     button.disabled = true;
     try {
       const response = await fetch('/messages', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text })
+        body: payload
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Could not share text.');
@@ -235,6 +254,10 @@ PAGE = r"""<!doctype html>
     const folderPicker = document.querySelector('#folderPicker');
     const selected = [...filePicker.files, ...folderPicker.files];
     if (!selected.length) { status.textContent = 'Choose one or more files or a folder first.'; return; }
+    if (selected.length > MAX_FILES_PER_BATCH) {
+      status.textContent = `A batch can contain at most ${MAX_FILES_PER_BATCH.toLocaleString()} files.`;
+      return;
+    }
     const files = selected.map(file => ({name: file.webkitRelativePath || file.name, size: file.size}));
     const button = document.querySelector('#upload');
     button.disabled = true;
@@ -276,6 +299,103 @@ PAGE = r"""<!doctype html>
 """
 
 
+AUTH_PAGE = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Join ClipShare</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { margin: 12vh auto 0; padding: 20px; max-width: 440px; background: #f5f5f4; color: #202124; }
+    main { padding: 24px; border: 1px solid #dedfdf; border-radius: 12px; background: white; }
+    h1 { margin-top: 0; }
+    p { color: #62666b; }
+    label { display: block; margin: 18px 0 8px; font-weight: 600; }
+    input, button { box-sizing: border-box; width: 100%; min-height: 46px; padding: 10px 12px; border-radius: 8px; font: inherit; }
+    input { border: 1px solid #aeb4bb; }
+    button { margin-top: 12px; border: 0; background: #1769d2; color: white; font-weight: 600; cursor: pointer; }
+    #status { min-height: 1.5em; color: #a52222; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #151719; color: #eceff1; }
+      main, input { background: #202326; color: #eceff1; border-color: #43484d; }
+      p { color: #aab0b6; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Join ClipShare</h1>
+    <p>Enter the temporary session code shown in the ClipShare window on the host computer.</p>
+    <form id="join">
+      <label for="code">Session code</label>
+      <input id="code" name="code" autocomplete="one-time-code" autocapitalize="characters" required maxlength="14" autofocus>
+      <button id="submit" type="submit">Join session</button>
+    </form>
+    <div id="status" role="status" aria-live="polite"></div>
+  </main>
+<script>
+  document.querySelector('#join').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = document.querySelector('#submit');
+    const status = document.querySelector('#status');
+    button.disabled = true;
+    status.textContent = '';
+    try {
+      const response = await fetch('/auth', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({code: document.querySelector('#code').value})
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Could not join this session.');
+      window.location.replace('/');
+    } catch (error) {
+      status.textContent = error.message || 'Could not join this session.';
+    } finally {
+      button.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
+"""
+
+
+class ShareState:
+    """Per-session messages, uploads, pairing code, and browser authorizations."""
+
+    def __init__(self, storage_root, pairing_code):
+        self.storage_root = storage_root
+        self.pairing_code = pairing_code
+        self.messages = []
+        self.messages_lock = threading.Lock()
+        self.upload_batches = []
+        self.uploads_lock = threading.Lock()
+        self.pending_uploads = {}
+        self.stored_bytes = 0
+        self.sessions = set()
+        self.auth_attempts = {}
+        self.auth_lock = threading.Lock()
+
+
+class ClipShareHTTPServer(ThreadingHTTPServer):
+    daemon_threads = False
+    block_on_close = True
+    # On Windows, SO_REUSEADDR permits competing listeners to share a port.
+    # Keep normal address reuse on POSIX for fast restarts.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+    def __init__(self, address, handler, state):
+        self.share_state = state
+        super().__init__(address, handler)
+
+
 def local_ip():
     """Find the LAN address selected for outbound traffic without sending data."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -283,19 +403,37 @@ def local_ip():
         sock.connect(("192.0.2.1", 9))
         return sock.getsockname()[0]
     except OSError:
-        return "<PC-LAN-IP>"
+        return ""
     finally:
         sock.close()
 
 
+def new_pairing_code():
+    raw = "".join(secrets.choice(PAIRING_ALPHABET) for _ in range(12))
+    return "-".join((raw[:4], raw[4:8], raw[8:]))
+
+
+def normalize_pairing_code(value):
+    return "".join(character for character in value.upper() if character not in "- \t")
+
+
+def create_session_token():
+    return secrets.token_urlsafe(32)
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ClipboardShare/1.0"
+    server_version = "ClipShare/1.0"
+    timeout = 30
 
     def log_message(self, fmt, *args):
         # Keep the console quiet; the listening address is printed at startup.
         pass
 
-    def send_body(self, status, content_type, body):
+    @property
+    def state(self):
+        return self.server.share_state
+
+    def send_body(self, status, content_type, body, headers=()):
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(status)
@@ -303,20 +441,123 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "connect-src 'self'; img-src 'self' data:; form-action 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'",
+        )
+        for name, value in headers:
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
+
+    def authorized(self):
+        cookies = http.cookies.SimpleCookie()
+        try:
+            cookies.load(self.headers.get("Cookie", ""))
+            token = cookies[COOKIE_NAME].value
+        except (KeyError, http.cookies.CookieError):
+            return False
+        with self.state.auth_lock:
+            return token in self.state.sessions
+
+    def require_authorization(self):
+        if self.authorized():
+            return True
+        self.send_body(401, "application/json; charset=utf-8", '{"error":"Enter the session code first."}')
+        return False
+
+    def discard_small_rejected_body(self, length):
+        """Drain a small over-limit body to avoid resetting a completed request."""
+        if length > MAX_MESSAGE_BYTES + MAX_REJECTED_MESSAGE_DRAIN_BYTES:
+            return
+        try:
+            self.connection.settimeout(2)
+            remaining = length
+            while remaining:
+                chunk = self.rfile.read(min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            # The request was incomplete or too slow. The 413 still applies;
+            # closing the connection prevents reuse with unread request bytes.
+            pass
+        finally:
+            try:
+                self.connection.settimeout(self.timeout)
+            except OSError:
+                pass
+
+    def do_auth(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 4096:
+            self.send_body(400, "application/json; charset=utf-8", '{"error":"Enter the session code."}')
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            code = payload.get("code") if isinstance(payload, dict) else None
+            if not isinstance(code, str):
+                raise ValueError
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            self.send_body(400, "application/json; charset=utf-8", '{"error":"Enter the session code."}')
+            return
+
+        address = self.client_address[0]
+        now = time.monotonic()
+        with self.state.auth_lock:
+            if address not in self.state.auth_attempts and len(self.state.auth_attempts) >= 4096:
+                expired = [
+                    peer for peer, (_count, started) in self.state.auth_attempts.items()
+                    if now - started >= AUTH_ATTEMPT_WINDOW
+                ]
+                for peer in expired:
+                    self.state.auth_attempts.pop(peer, None)
+                if len(self.state.auth_attempts) >= 4096:
+                    self.state.auth_attempts.pop(next(iter(self.state.auth_attempts)))
+            attempts, first_attempt = self.state.auth_attempts.get(address, (0, now))
+            if now - first_attempt >= AUTH_ATTEMPT_WINDOW:
+                attempts, first_attempt = 0, now
+            if attempts >= AUTH_ATTEMPT_LIMIT:
+                self.state.auth_attempts[address] = (attempts, first_attempt)
+                self.send_body(429, "application/json; charset=utf-8", '{"error":"Too many tries. Wait a few minutes and try again."}')
+                return
+            expected = normalize_pairing_code(self.state.pairing_code)
+            supplied = normalize_pairing_code(code)
+            if not hmac.compare_digest(supplied, expected):
+                self.state.auth_attempts[address] = (attempts + 1, first_attempt)
+                self.send_body(401, "application/json; charset=utf-8", '{"error":"That session code did not match."}')
+                return
+            if len(self.state.sessions) >= MAX_SESSIONS:
+                self.send_body(429, "application/json; charset=utf-8", '{"error":"This session has reached its device limit."}')
+                return
+            self.state.auth_attempts.pop(address, None)
+            token = create_session_token()
+            self.state.sessions.add(token)
+
+        cookie = f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict"
+        self.send_body(200, "application/json; charset=utf-8", '{"ok":true}', (("Set-Cookie", cookie),))
 
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/":
-            self.send_body(200, "text/html; charset=utf-8", PAGE)
+            page = PAGE if self.authorized() else AUTH_PAGE
+            self.send_body(200, "text/html; charset=utf-8", page)
+        elif not self.require_authorization():
+            return
         elif path == "/messages":
-            with messages_lock:
-                data = json.dumps(messages, ensure_ascii=False).encode("utf-8")
+            with self.state.messages_lock:
+                data = json.dumps(self.state.messages, ensure_ascii=False).encode("utf-8")
             self.send_body(200, "application/json; charset=utf-8", data)
         elif path == "/files":
-            with uploads_lock:
-                data = json.dumps(upload_batches, ensure_ascii=False).encode("utf-8")
+            with self.state.uploads_lock:
+                data = json.dumps(self.state.upload_batches, ensure_ascii=False).encode("utf-8")
             self.send_body(200, "application/json; charset=utf-8", data)
         elif path.startswith("/file/"):
             self.send_file(path)
@@ -331,38 +572,40 @@ class Handler(BaseHTTPRequestHandler):
             self.send_body(404, "text/plain; charset=utf-8", "Not found")
             return
         batch_id, file_id = parts[2], parts[3]
-        with uploads_lock:
-            batch = next((item for item in upload_batches if item["id"] == batch_id), None)
+        with self.state.uploads_lock:
+            batch = next((item for item in self.state.upload_batches if item["id"] == batch_id), None)
             file_info = next((item for item in batch["files"] if item["id"] == file_id), None) if batch else None
-            file_path = os.path.join(storage_root, batch_id, file_id) if file_info else None
+            file_path = os.path.join(self.state.storage_root, batch_id, file_id) if file_info else None
         if not file_info:
             self.send_body(404, "text/plain; charset=utf-8", "Not found")
             return
-        try:
-            with open(file_path, "rb") as uploaded:
-                data = uploaded.read()
-        except OSError:
+        if not os.path.isfile(file_path):
             self.send_body(404, "text/plain; charset=utf-8", "Not found")
             return
         self.send_download_file(file_path, file_info["path"], "application/octet-stream")
 
     def send_zip(self, path):
         name = unquote(path[len("/files/"):-len(".zip")])
-        with uploads_lock:
-            batch = next((item for item in upload_batches if item["id"] == name), None)
+        with self.state.uploads_lock:
+            batch = next((item for item in self.state.upload_batches if item["id"] == name), None)
             files = list(batch["files"]) if batch else []
         if not batch:
             self.send_body(404, "text/plain; charset=utf-8", "Not found")
             return
-        zip_path = os.path.join(storage_root, f"{name}.zip.tmp")
+        zip_path = None
         try:
+            fd, zip_path = tempfile.mkstemp(prefix="clipshare-", suffix=".zip.tmp", dir=self.state.storage_root)
+            os.close(fd)
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
                 for item in files:
-                    file_path = os.path.join(storage_root, batch["id"], item["id"])
+                    file_path = os.path.join(self.state.storage_root, batch["id"], item["id"])
                     archive.write(file_path, arcname=item["path"])
         except OSError:
-            try: os.unlink(zip_path)
-            except OSError: pass
+            if zip_path:
+                try:
+                    os.unlink(zip_path)
+                except OSError:
+                    pass
             self.send_body(500, "text/plain; charset=utf-8", "Could not create ZIP")
             return
         try:
@@ -397,6 +640,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/auth":
+            self.do_auth()
+            return
+        if not self.require_authorization():
+            return
         if path == "/upload/start":
             self.start_upload()
             return
@@ -411,7 +659,15 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_MESSAGE_BYTES:
-            self.send_body(413, "application/json; charset=utf-8", '{"error":"Text is empty or too large (200 KB max)."}')
+            if length > MAX_MESSAGE_BYTES:
+                self.discard_small_rejected_body(length)
+            self.close_connection = True
+            self.send_body(
+                413,
+                "application/json; charset=utf-8",
+                '{"error":"Text is empty or too large (200 KB max)."}',
+                headers=(("Connection", "close"),),
+            )
             return
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -429,39 +685,97 @@ class Handler(BaseHTTPRequestHandler):
             "time": datetime.now().astimezone().strftime("%H:%M:%S"),
             "source": self.client_address[0],
         }
-        with messages_lock:
-            messages.append(entry)
-            del messages[:-MAX_MESSAGES]
+        with self.state.messages_lock:
+            self.state.messages.append(entry)
+            del self.state.messages[:-MAX_MESSAGES]
         self.send_body(201, "application/json; charset=utf-8", '{"ok":true}')
 
     def start_upload(self):
-        global stored_bytes
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length))
-            files = payload.get("files", [])
-            total = sum(int(item["size"]) for item in files)
-            if not files or total < 0 or total > MAX_UPLOAD_BYTES:
+            if length <= 0 or length > MAX_UPLOAD_START_BYTES:
                 raise ValueError
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError
+            files = payload.get("files", [])
+            if not isinstance(files, list) or not files:
+                raise ValueError
+            if len(files) > MAX_FILES_PER_BATCH:
+                self.send_body(
+                    413,
+                    "application/json; charset=utf-8",
+                    json.dumps({"error": f"An upload batch can contain at most {MAX_FILES_PER_BATCH:,} files."}),
+                )
+                return
             cleaned = []
+            seen_names = set()
             for item in files:
-                name = str(item["name"]).replace("\\", "/")
+                if not isinstance(item, dict):
+                    raise ValueError
+                name = item.get("name")
+                size = item.get("size")
+                if not isinstance(name, str) or not isinstance(size, int) or isinstance(size, bool) or size < 0:
+                    raise ValueError
+                name = name.replace("\\", "/")
                 rel = PurePosixPath(name)
-                if rel.is_absolute() or ".." in rel.parts: raise ValueError
-                cleaned.append(("/".join(p for p in rel.parts if p not in ("", ".")), int(item["size"])))
-            if any(not name for name, _ in cleaned): raise ValueError
+                if (
+                    rel.is_absolute()
+                    or name.startswith("/")
+                    or re.match(r"^[A-Za-z]:", name)
+                    or ".." in rel.parts
+                    or any(ord(character) < 32 or ord(character) == 127 for character in name)
+                ):
+                    raise ValueError
+                normalized = "/".join(part for part in rel.parts if part not in ("", "."))
+                components = normalized.split("/")
+                if (
+                    not normalized
+                    or len(normalized) > 1024
+                    or normalized in seen_names
+                    or any(
+                        component.endswith((".", " "))
+                        or any(character in '<>:"|?*' for character in component)
+                        or component.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES
+                        for component in components
+                    )
+                ):
+                    raise ValueError
+                seen_names.add(normalized)
+                cleaned.append((normalized, size))
+            total = sum(size for _name, size in cleaned)
+            if total > MAX_UPLOAD_BYTES:
+                raise ValueError
         except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-            self.send_body(400, "application/json; charset=utf-8", '{"error":"Invalid file list or upload exceeds 3 GB."}')
+            self.send_body(400, "application/json; charset=utf-8", '{"error":"Invalid file list or upload exceeds the 3 GB batch limit."}')
             return
-        with uploads_lock:
-            pending = sum(item["total"] for item in pending_uploads.values())
-            if stored_bytes + pending + total > MAX_STORED_BYTES:
+        with self.state.uploads_lock:
+            pending = sum(item["total"] for item in self.state.pending_uploads.values())
+            if len(self.state.upload_batches) + len(self.state.pending_uploads) >= MAX_UPLOAD_BATCHES:
+                self.send_body(413, "application/json; charset=utf-8", '{"error":"This session has reached its upload batch limit."}')
+                return
+            if self.state.stored_bytes + pending + total > MAX_STORED_BYTES:
                 self.send_body(413, "application/json; charset=utf-8", '{"error":"The 3 GB temporary storage limit has been reached."}')
                 return
             batch_id = uuid.uuid4().hex
-            batch_dir = os.path.join(storage_root, batch_id)
-            os.makedirs(batch_dir)
-            pending_uploads[batch_id] = {"total": total, "files": [{"id": uuid.uuid4().hex, "path": n, "size": s, "written": 0} for n, s in cleaned], "source": self.client_address[0]}
+            batch_dir = os.path.join(self.state.storage_root, batch_id)
+            files = [{"id": uuid.uuid4().hex, "path": name, "size": size, "written": 0} for name, size in cleaned]
+            try:
+                os.makedirs(batch_dir)
+                for item in files:
+                    if item["size"] == 0:
+                        with open(os.path.join(batch_dir, item["id"]), "xb"):
+                            pass
+            except OSError:
+                shutil.rmtree(batch_dir, ignore_errors=True)
+                self.send_body(500, "application/json; charset=utf-8", '{"error":"Could not prepare temporary upload storage."}')
+                return
+            self.state.pending_uploads[batch_id] = {
+                "total": total,
+                "files": files,
+                "source": self.client_address[0],
+                "write_lock": threading.Lock(),
+            }
         self.send_body(201, "application/json; charset=utf-8", json.dumps({"id": batch_id}))
 
     def receive_upload_chunk(self, path):
@@ -471,57 +785,137 @@ class Handler(BaseHTTPRequestHandler):
         batch_id, index = parts[1], parts[2]
         if index == "finish":
             self.finish_upload(batch_id); return
-        try: index = int(index); offset = int(self.headers.get("X-Chunk-Offset", "-1")); length = int(self.headers.get("Content-Length", "0"))
-        except ValueError: index, offset, length = -1, -1, -1
-        with uploads_lock:
-            pending = pending_uploads.get(batch_id)
+        try:
+            index = int(index)
+            offset = int(self.headers.get("X-Chunk-Offset", "-1"))
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            index, offset, length = -1, -1, -1
+
+        with self.state.uploads_lock:
+            pending = self.state.pending_uploads.get(batch_id)
             if not pending or index < 0 or index >= len(pending["files"]):
-                self.send_body(404, "application/json; charset=utf-8", '{"error":"Upload not found"}'); return
-            item = pending["files"][index]
-            if offset != item["written"] or length <= 0 or length > UPLOAD_CHUNK_BYTES or offset + length > item["size"]:
-                self.send_body(400, "application/json; charset=utf-8", '{"error":"Invalid chunk offset or size"}'); return
-            dest = os.path.join(storage_root, batch_id, item["id"])
-            with open(dest, "ab") as out:
-                remaining = length
-                while remaining:
-                    chunk = self.rfile.read(min(1024 * 1024, remaining))
-                    if not chunk: raise OSError("incomplete chunk")
-                    out.write(chunk); remaining -= len(chunk)
+                upload_lock = None
+            else:
+                upload_lock = pending["write_lock"]
+        if upload_lock is None:
+            self.send_body(404, "application/json; charset=utf-8", '{"error":"Upload not found"}')
+            return
+
+        # Serialize chunks for this batch, but never hold the session-wide lock
+        # while waiting for bytes from a client.
+        with upload_lock:
+            with self.state.uploads_lock:
+                if self.state.pending_uploads.get(batch_id) is not pending:
+                    self.send_body(404, "application/json; charset=utf-8", '{"error":"Upload not found"}')
+                    return
+                item = pending["files"][index]
+                if (
+                    offset != item["written"]
+                    or length <= 0
+                    or length > UPLOAD_CHUNK_BYTES
+                    or offset + length > item["size"]
+                ):
+                    self.send_body(400, "application/json; charset=utf-8", '{"error":"Invalid chunk offset or size"}')
+                    return
+                dest = os.path.join(self.state.storage_root, batch_id, item["id"])
+
+            try:
+                chunk = self.rfile.read(length)
+            except OSError:
+                self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload connection ended before the chunk arrived."}')
+                return
+            if len(chunk) != length:
+                self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload chunk was incomplete; start the upload again."}')
+                return
+            try:
+                with open(dest, "ab") as out:
+                    out.write(chunk)
+            except OSError:
+                self.send_body(500, "application/json; charset=utf-8", '{"error":"Could not save this upload chunk."}')
+                return
             item["written"] += length
         self.send_body(200, "application/json; charset=utf-8", '{"ok":true}')
 
     def finish_upload(self, batch_id):
-        global stored_bytes
-        with uploads_lock:
-            pending = pending_uploads.get(batch_id)
-            if not pending or any(f["written"] != f["size"] for f in pending["files"]):
-                self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload is incomplete"}'); return
-            files = [{k: f[k] for k in ("id", "path", "size")} for f in pending["files"]]
-            upload_batches.append({"id": batch_id, "time": datetime.now().astimezone().strftime("%H:%M:%S"), "source": pending["source"], "files": files})
-            stored_bytes += pending["total"]; del pending_uploads[batch_id]
+        with self.state.uploads_lock:
+            pending = self.state.pending_uploads.get(batch_id)
+            upload_lock = pending["write_lock"] if pending else None
+        if upload_lock is None:
+            self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload is incomplete"}')
+            return
+
+        with upload_lock:
+            with self.state.uploads_lock:
+                pending = self.state.pending_uploads.get(batch_id)
+                if not pending or any(f["written"] != f["size"] for f in pending["files"]):
+                    self.send_body(400, "application/json; charset=utf-8", '{"error":"Upload is incomplete"}')
+                    return
+                files = [{k: f[k] for k in ("id", "path", "size")} for f in pending["files"]]
+                self.state.upload_batches.append({"id": batch_id, "time": datetime.now().astimezone().strftime("%H:%M:%S"), "source": pending["source"], "files": files})
+                self.state.stored_bytes += pending["total"]
+                del self.state.pending_uploads[batch_id]
         self.send_body(201, "application/json; charset=utf-8", '{"ok":true}')
 
 
+class ShareServer:
+    """One temporary sharing session and its HTTP listener."""
+
+    def __init__(self, host=HOST, port=PORT):
+        self.host = host
+        self.requested_port = port
+        self.port_fallback = False
+        self.temp_storage = tempfile.TemporaryDirectory(prefix="clipshare-")
+        self.state = ShareState(self.temp_storage.name, new_pairing_code())
+        try:
+            self.httpd = ClipShareHTTPServer((host, port), Handler, self.state)
+        except OSError as error:
+            windows_conflict = os.name == "nt" and (
+                getattr(error, "winerror", None) in (10013, 10048)
+                or error.errno in (10013, errno.EACCES)
+            )
+            if port == 0 or (error.errno != errno.EADDRINUSE and not windows_conflict):
+                self.temp_storage.cleanup()
+                raise
+            try:
+                self.httpd = ClipShareHTTPServer((host, 0), Handler, self.state)
+            except OSError:
+                self.temp_storage.cleanup()
+                raise
+            self.port_fallback = True
+        self.port = self.httpd.server_address[1]
+        self.thread = None
+        self._stopped = False
+        self._stop_lock = threading.Lock()
+
+    def start(self):
+        if self.thread is not None:
+            raise RuntimeError("This ClipShare session has already been started.")
+        self.thread = threading.Thread(target=self.httpd.serve_forever, name="ClipShareHTTP", daemon=False)
+        try:
+            self.thread.start()
+        except RuntimeError:
+            self.temp_storage.cleanup()
+            self.httpd.server_close()
+            raise
+        return self
+
+    def stop(self):
+        with self._stop_lock:
+            if self._stopped:
+                return
+            if self.thread is not None and self.thread.is_alive():
+                self.httpd.shutdown()
+                self.thread.join()
+            self.httpd.server_close()
+            self.temp_storage.cleanup()
+            self._stopped = True
+
+
 def main():
-    global storage_root
-    temp_storage = tempfile.TemporaryDirectory(prefix="clipboard-share-")
-    storage_root = temp_storage.name
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Clipboard Share is running. On this PC: http://localhost:{PORT}")
-    print(f"On your phone:          http://{local_ip()}:{PORT}")
-    print("Keep this terminal open; press Ctrl+C to stop. Shared messages are kept in memory.")
+    from .desktop import main as desktop_main
 
-    def request_shutdown(_signum, _frame):
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, request_shutdown)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping Clipboard Share.")
-    finally:
-        server.server_close()
-        temp_storage.cleanup()
+    desktop_main()
 
 
 if __name__ == "__main__":

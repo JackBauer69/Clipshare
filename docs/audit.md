@@ -1,9 +1,11 @@
-# Initial implementation audit
+# Baseline implementation audit
 
-- `src/clipshare/clipboard_share.py` is the original executable web app. It has no third-party imports and uses `ThreadingHTTPServer` on `0.0.0.0:3570`.
-- Text sharing is in-memory, capped at 100 entries and 200 KB per message. Uploads are chunked, limited to 3 GB per batch and in temporary storage, and removed at process shutdown.
-- The web app has no authentication or TLS. Anyone with network access to its port can read and add content.
-- `service/install.py` provisions three systemd **user** units. The share unit is not enabled by default; the tray and lock monitor are enabled for the Plasma graphical session. The monitor stops sharing on screen lock.
-- The tray integration imports PySide6; the lock monitor imports dbus-python and PyGObject. These are external to the web app.
-- The existing installed units and helpers pointed to the old `~/.Scripts` paths. The old application entry is now a symlink to `src/clipshare/clipboard_share.py`, so existing service references continue to resolve. Running this project's installer regenerates the units with the new project path.
-- The user-scope systemd bus could not be reached from the migration environment. Active/enabled status and a live service restart therefore remain unverified. The optional desktop modules import successfully under `/usr/bin/python3`, which is the interpreter used by the service templates. The interactive Plasma integration still could not be exercised in this session.
+This records the implementation found before the cross-platform redesign. The original `main` worktree remains available as an untouched reference.
+
+- `src/clipshare/clipboard_share.py` contained the actual application: a standard-library `ThreadingHTTPServer`, inline browser UI, and a listener on `0.0.0.0:3570`.
+- Text messages were held in memory, capped at 100 messages and 200 KB per message. Files and folders were uploaded in 8 MiB chunks, with a 3 GiB batch and total temporary-storage cap. Folder paths were retained and batches could be downloaded as ZIP files.
+- Uploaded files lived in a temporary directory and were removed when the process exited. There was no authentication or TLS, so anyone able to reach the listener could access the content.
+- The `service/` directory held systemd user units, a PySide6 KDE tray helper, a D-Bus/Plasma screen-lock monitor, and Linux-specific install/uninstall scripts. These are not part of the redesigned product and are removed from this branch.
+- The source-checkout wrapper only located and ran the application module. The initial HTTP tests covered the page and text submission, but not uploads, limits, lifecycle, authentication, or packaging.
+
+The replacement keeps the browser sharing interface and temporary data model, adds a Tkinter control window and session pairing, and moves packaging to native platform builds. The expanded test suite exercises HTTP behavior over loopback and temporary directories. See [the architecture plan](architecture-and-porting-plan.md) and [the development guide](development.md) for current decisions and remaining validation.
