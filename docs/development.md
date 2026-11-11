@@ -72,7 +72,7 @@ RPM requirements were inspected with `rpm -qp --requires` and `--provides`. The 
 
 ## CI and release workflow
 
-`.github/workflows/cross-platform.yml` runs the tests on Windows x64, Ubuntu 22.04 x64, macOS 15 Intel, and macOS 15 Apple Silicon using Python 3.12. Linux package creation is a deliberate exception: on Ubuntu 22.04 it uses system Python 3.10 and system Tcl/Tk, enforces a GLIBC 2.35 maximum, and smoke-tests the extracted `.deb` on that baseline. It also installs and smoke-tests the `.rpm` in Fedora 45. Windows and macOS use native Python 3.12 builds. The current local session cannot run hosted GitHub Actions; configured native jobs are not evidence that those OS builds have passed until the workflow runs.
+`.github/workflows/cross-platform.yml` runs the tests on Windows x64, Ubuntu 22.04 x64, macOS 15 Intel, and macOS 15 Apple Silicon using Python 3.12. Linux package creation is a deliberate exception: on Ubuntu 22.04 it uses system Python 3.10 and system Tcl/Tk, enforces a GLIBC 2.35 maximum, and smoke-tests the extracted `.deb` on that baseline. It also installs and smoke-tests the `.rpm` in Fedora 45. Windows and macOS use native Python 3.12 builds. GitHub Actions run [#42560420432](https://github.com/JackBauer69/clipshare/actions/runs/42560420432) passed all eight tests/package jobs. The owner installed the resulting `.deb` on Kali Linux and verified real sharing. Those results verify the build pipeline and Kali test, but do not replace manual installation and UI/network testing on physical Windows and macOS systems.
 
 A tag matching the package version (`v0.1.0` for the current version) triggers a release job. The release job requires an owner-selected `LICENSE` file, a public `CLIPSHARE_MAINTAINER` repository variable in the form `ClipShare Team <team@example.org>`, and signed/notarized macOS packages; it fails without them. The owner must choose and add a license for the ClipShare source before publishing because GitHub also exposes source archives for releases. Do not create or push a tag as part of ordinary development.
 
@@ -84,6 +84,20 @@ Configure these as protected repository Actions secrets only when signing creden
 No certificate, password, API key, or token belongs in source control. Without the macOS signing and notarization secrets, CI can build unsigned packages for review, but the release job will not publish them. An unsigned Windows installer can produce a SmartScreen warning.
 
 For Linux package metadata, set the non-secret `CLIPSHARE_MAINTAINER` repository variable before release. Development builds use an explicit `.invalid` placeholder until the owner supplies the project contact.
+
+## First public release checklist
+
+The repository remains private and no official public release has been published. Before publishing `v0.1.0`:
+
+1. Change the repository default branch to `main` (Settings → General → Default branch), after confirming the merged cross-platform tree.
+2. Have the owner choose and approve a source-code license. Add the exact license in `LICENSE`, update the RPM `License:` field, and reconcile the third-party notices. Do not infer a license from the dependency licenses.
+3. Set the non-secret `CLIPSHARE_MAINTAINER` repository Actions variable to a real project contact.
+4. Manually install, use, and uninstall the Windows and macOS packages on supported computers; exercise pairing, file/text sharing, stop/restart, and cleanup. Keep the Kali Linux result as separately documented validation.
+5. Configure macOS Developer ID signing and notarization. The tag-triggered release job deliberately refuses to publish unsigned or unnotarized macOS installers.
+6. Decide whether to sign Windows installers to reduce SmartScreen prompts, review release notes and supported-OS claims, and ensure no secrets or personal files are in the repository.
+7. Only after these gates are met, deliberately create and push the `v0.1.0` tag and confirm the official GitHub Release contains the correct installers.
+
+Ordinary pull requests and CI build artifacts are not public releases. Do not bypass the release workflow's licensing/signing checks to publish early.
 
 ## Support matrix and adding targets
 
