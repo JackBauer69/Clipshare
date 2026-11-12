@@ -90,7 +90,7 @@ For Linux package metadata, set the non-secret `CLIPSHARE_MAINTAINER` repository
 The repository remains private and no official public release has been published. Before publishing `v0.1.0`:
 
 1. Change the repository default branch to `main` (Settings → General → Default branch), after confirming the merged cross-platform tree.
-2. Have the owner choose and approve a source-code license. Add the exact license in `LICENSE`, update the RPM `License:` field, and reconcile the third-party notices. Do not infer a license from the dependency licenses.
+2. The owner has chosen to retain proprietary source-code rights for now. Obtain legal review of end-user permission for official binaries, permitted personal changes, commercial redistribution and derivative-code licensing; then add approved legal terms in the correct files, update the RPM `License:` field and third-party notices. See `LICENSING.md`. Do not treat the current rights statement as a completed EULA or an open-source license.
 3. Set the non-secret `CLIPSHARE_MAINTAINER` repository Actions variable to a real project contact.
 4. Manually install, use, and uninstall the Windows and macOS packages on supported computers; exercise pairing, file/text sharing, stop/restart, and cleanup. Keep the Kali Linux result as separately documented validation.
 5. Configure macOS Developer ID signing and notarization. The tag-triggered release job deliberately refuses to publish unsigned or unnotarized macOS installers.
@@ -107,4 +107,4 @@ To add an OS or architecture, add a native hosted runner to both test and packag
 
 ## Licensing and distribution notes
 
-The bundle includes Python, Tcl/Tk, and PyInstaller license texts under `third_party_licenses/`. PyInstaller's bootloader exception permits distributing bundled applications. The repository currently has no source license; the project owner must select one before publishing source. RPM metadata uses a placeholder `LicenseRef` until that decision is made; update the RPM `License:` field and this notice after the owner selects a license. Release CI rejects the placeholder. NSIS and Linux package tools are build-time dependencies, not installed runtime components.
+The bundle includes Python, Tcl/Tk, and PyInstaller license texts under `third_party_licenses/`. PyInstaller's bootloader exception permits distributing bundled applications. The owner has selected proprietary rights for the original source code; `LICENSING.md` documents that intent, but it is not a legally reviewed end-user or commercial-license agreement. The repository has no `LICENSE` file yet; final terms must be approved before public distribution. RPM metadata uses a placeholder `LicenseRef` pending those terms; update the RPM `License:` field and this notice when the legal distribution terms are ready. Release CI rejects the placeholder. NSIS and Linux package tools are build-time dependencies, not installed runtime components.
