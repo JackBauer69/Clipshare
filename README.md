@@ -16,17 +16,17 @@ The first release is being prepared for these 64-bit systems:
 | Debian/Ubuntu x64 | `.deb` package | Debian 12 or Ubuntu 22.04 or later |
 | Fedora x64 | `.rpm` package | Fedora 45 or later |
 
-These are the intended release targets. GitHub Actions has successfully completed automated tests and packaging for Windows x64, macOS Intel, macOS Apple Silicon, and Linux x64, including package smoke tests (run [#42560420432](https://github.com/JackBauer69/clipshare/actions/runs/42560420432)). The owner has also installed the Linux `.deb` on Kali Linux and confirmed real device-to-device sharing. Windows and macOS have **not** yet been manually validated on physical machines. These builds are workflow artifacts, **not** a published release. A public release will appear on the project's GitHub **Releases** page only after the owner publishes one; do not download installers from unofficial sources.
+These are the intended release targets. GitHub Actions has successfully completed automated tests and packaging for Windows x64, macOS Intel, macOS Apple Silicon, and Linux x64, including package smoke tests (run [#42560420432](https://github.com/JackBauer69/clipshare/actions/runs/42560420432)). The owner has also installed the Linux `.deb` on Kali Linux and confirmed real device-to-device sharing. The owner has also installed the Windows installer successfully in a Windows VM. Windows file-sharing functionality and Windows uninstall/reinstall have not yet been separately confirmed; macOS has not been manually tested on physical machines. These builds are workflow artifacts, **not** a published release. A public release will appear on the project's GitHub **Releases** page only after the owner publishes one; do not download installers from unofficial sources.
 
-## Licensing status
+## License
 
-ClipShare's original source code is currently **proprietary, with no public source-code license granted**. The owner intends to allow use of the official application while requiring separate permission for commercial redistribution or products derived from the source code. End-user and commercial-license terms still need legal review and have **not** been finalized. See [LICENSING.md](LICENSING.md) for the current rights and licensing status. Third-party components retain their own licenses.
+ClipShare's original source code is available under the [MIT License](LICENSE), which permits commercial use, modification, and redistribution when required notices are retained. See [LICENSING.md](LICENSING.md) for a summary. Bundled third-party components retain their own licenses.
 
 ## Development-build downloads
 
 For private testing, the owner and authorized repository collaborators can download the four ZIP artifact groups from the successful [GitHub Actions run #42560420432](https://github.com/JackBauer69/clipshare/actions/runs/42560420432) under **Artifacts**. The ZIP groups contain the Windows `.exe`, Linux `.deb` and `.rpm`, and the two macOS `.pkg` installers. Artifacts have limited retention and are not permanent public download URLs.
 
-These test installers may be unsigned. The official public release is **not yet available**, and the source-code license and macOS signing/notarization requirements must be addressed before publishing.
+These test installers may be unsigned. The official public release is **not yet available**, and macOS signing/notarization is still needed for the existing all-platform release workflow.
 
 ## Install and use
 
