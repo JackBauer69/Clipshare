@@ -85,8 +85,54 @@ class ClipShareHTTPTests(unittest.TestCase):
 
     def test_pairing_attempts_are_rate_limited(self):
         for _ in range(clipboard_share.AUTH_ATTEMPT_LIMIT):
-            status, _body, _headers = self.post_json("/auth", {"code": "AAAAAAAAAAAA"})
+            status, _body, _headers = self.post_json("/auth", {"code": "xxxx"})
             self.assertEqual(status, 401)
+        status, _body, _headers = self.post_json("/auth", {"code": self.server.state.pairing_code})
+        self.assertEqual(status, 429)
+
+    def test_four_digit_numeric_pairing_code(self):
+        code = self.server.state.pairing_code
+        self.assertRegex(code, r"^[0-9]{4}$")
+        self.assertEqual(clipboard_share.normalize_pairing_code(" 0007 "), "0007")
+        for _ in range(100):
+            self.assertRegex(clipboard_share.new_pairing_code(), r"^[0-9]{4}$")
+        status, _body, _headers = self.post_json("/auth", {"code": "12345"})
+        self.assertEqual(status, 401)
+        self.join()
+
+    def test_host_local_login_is_one_use_and_cookie_authorizes(self):
+        ticket_url = self.server.local_login_url()
+        self.assertTrue(ticket_url.startswith(f"http://127.0.0.1:{self.server.port}/_local_login/"))
+        path = ticket_url.removeprefix(self.base_url)
+        status, _body, headers = self.request(path)
+        self.assertEqual(status, 200)  # urllib follows the login redirect
+        status, page, _headers = self.request("/")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Share selected files", page)
+        # A second browser cannot replay the consumed ticket.
+        other = build_opener(HTTPCookieProcessor(CookieJar()))
+        with self.assertRaises(HTTPError) as caught:
+            other.open(self.base_url + path, timeout=5)
+        self.assertEqual(caught.exception.code, 404)
+
+    def test_host_login_ticket_expires_and_is_rotated(self):
+        previous = self.server.local_login_url()
+        replacement = self.server.local_login_url()
+        self.assertNotEqual(previous, replacement)
+        status, _body, _headers = self.request(previous.removeprefix(self.base_url))
+        self.assertEqual(status, 404)
+        with patch("clipshare.clipboard_share.time.monotonic", return_value=time.monotonic() + 120):
+            status, _body, _headers = self.request(replacement.removeprefix(self.base_url))
+        self.assertEqual(status, 404)
+        status, _body, _headers = self.request("/messages")
+        self.assertEqual(status, 401)
+
+    def test_global_pairing_guess_limit(self):
+        # Simulate guesses coming from many IPs: the global throttle
+        # remains effective even when the per-IP limit is not reached.
+        now = time.monotonic()
+        with self.server.state.auth_lock:
+            self.server.state.global_auth_attempts = [now] * clipboard_share.AUTH_GLOBAL_ATTEMPT_LIMIT
         status, _body, _headers = self.post_json("/auth", {"code": self.server.state.pairing_code})
         self.assertEqual(status, 429)
 
