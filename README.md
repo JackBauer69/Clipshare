@@ -1,6 +1,6 @@
 # ClipShare
 
-ClipShare lets you share text, files, and folders between devices that can reach the same local network. The host opens a small desktop control window and the sharing page in your default browser. Other devices open the LAN address shown in that window and enter the session code.
+ClipShare lets you share text, files, and folders between devices that can reach the same local network. The host opens a small desktop control window and automatically authorizes the sharing page in your default browser. Other devices open the LAN address shown in that window and enter a temporary four-digit pairing code.
 
 ClipShare is **not** an automatic operating-system clipboard synchronizer. It does not watch your clipboard or copy content to other devices in the background.
 
@@ -32,19 +32,19 @@ These test installers may be unsigned. The official public release is **not yet 
 
 1. Download the installer matching your operating system and processor from a published GitHub Release.
 2. Open it and follow the normal installer prompts. Windows installs for the current user; macOS installs ClipShare in Applications; Linux package managers install the application and add it to the application menu.
-3. Launch **ClipShare** from the Start menu, Applications, or Linux application menu. The control window starts a temporary sharing session and opens the join page in your default browser. Enter the session code shown in the control window once to open the sharing page.
-4. On another device on the same reachable network, open the **LAN address** shown in the control window and enter the same session code. You can use the buttons to copy either value.
+3. Launch **ClipShare** from the Start menu, Applications, or Linux application menu. The control window starts a temporary sharing session and automatically signs in the default browser through a one-use localhost link. No code entry is needed on the host browser.
+4. On another device on the same reachable network, open the **LAN address** shown in the control window and enter the four-digit session code. You can use the buttons to copy either value.
 5. Choose **Stop sharing** when you are done. **Quit** or closing the control window asks whether to stop and remove the session.
 
 Closing the browser does not stop sharing; the control window stays open so you can check the status or reopen the page. Logging out ends the desktop app and its session. ClipShare does not start automatically when you sign in.
 
 ## Privacy and network access
 
-The session code is generated for each start. A device enters it once; ClipShare then uses a temporary browser cookie to authorize that session. The code and session data stay on the host. There are no accounts, cloud storage, analytics, or external services required after installation.
+A random four-digit code is generated for each start. A joining device enters it once; ClipShare uses a temporary browser cookie to authorize that browser. The desktop application opens its local browser with a single-use, short-lived login link so the host does not have to type a code. Pairing guesses are throttled both per address and across the session, but four digits are intentionally a convenience/security tradeoff. The code and session data stay on the host. There are no accounts, cloud storage, analytics, or external services required after installation.
 
 Each file or folder upload batch can contain up to 1,000 files and 3 GB of data.
 
-ClipShare uses plain HTTP on the local network. Pairing helps prevent casual access by other devices, but it does not encrypt traffic or protect against someone who can monitor or alter an untrusted network. Use ClipShare only on a network you trust. Anyone with network access to the host and session access can view shared content. Your computer's firewall or network settings may need to allow local-network connections; ClipShare does not change firewall rules. Guest Wi-Fi isolation may prevent devices from reaching each other.
+ClipShare uses plain HTTP on the local network. Pairing helps prevent casual access by other devices, but a four-digit PIN is not strong protection against determined attackers and it does not encrypt traffic or protect against someone who can monitor or alter an untrusted network. Use ClipShare only on a network you trust. Anyone with network access to the host and session access can view shared content. Your computer's firewall or network settings may need to allow local-network connections; ClipShare does not change firewall rules. Guest Wi-Fi isolation may prevent devices from reaching each other.
 
 Messages are held in memory. Uploaded files are held in temporary storage outside the installation directory. **Stopping or quitting ClipShare deletes the messages and uploaded files for that session.** In-progress uploads are temporary too. The application does not make a permanent archive.
 

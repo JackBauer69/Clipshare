@@ -54,7 +54,7 @@ class ClipShareApp:
         code_frame = ttk.LabelFrame(frame, text="Session code", padding=12)
         code_frame.grid(row=3, column=0, sticky="ew", pady=(0, 14))
         code_frame.columnconfigure(0, weight=1)
-        ttk.Label(code_frame, text="Enter this code once in each browser joining this temporary session, including this computer.", wraplength=550).grid(row=0, column=0, sticky="w")
+        ttk.Label(code_frame, text="Enter this 4-digit code on your phone or another device. This computer joins automatically.", wraplength=550).grid(row=0, column=0, sticky="w")
         self.code_var = tk.StringVar(value="")
         ttk.Label(code_frame, textvariable=self.code_var, font=("TkFixedFont", 18, "bold")).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Button(code_frame, text="Copy code", command=self.copy_code).grid(row=2, column=0, sticky="w", pady=(6, 0))
@@ -116,12 +116,12 @@ class ClipShareApp:
             self.port_notice_var.set(f"Port 3570 was busy; using port {session.port} instead.")
         self.instance_lock.write_state({"running": True, "port": session.port})
         self.set_state(True)
-        if not webbrowser.open(self.local_url):
-            messagebox.showinfo("ClipShare is ready", f"Open this address in your browser:\n{self.local_url}", parent=self.root)
+        if not webbrowser.open(session.local_login_url()):
+            messagebox.showinfo("ClipShare is ready", "Click Open ClipShare to open the sharing page.", parent=self.root)
 
     def open_browser(self):
         if self.session is not None:
-            webbrowser.open(self.local_url)
+            webbrowser.open(self.session.local_login_url())
 
     def copy_lan_url(self):
         if not getattr(self, "lan_url", "") or self.lan_url.startswith("LAN address unavailable"):
@@ -218,6 +218,8 @@ def existing_instance(lock):
     root.withdraw()
     if state.get("running") and isinstance(state.get("port"), int):
         webbrowser.open(f"http://localhost:{state['port']}/")
+        # A second process cannot safely mint a local login ticket; use the
+        # existing desktop window's Open ClipShare button for automatic login.
     else:
         messagebox.showinfo(
             "ClipShare is already open",

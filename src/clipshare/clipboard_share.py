@@ -32,7 +32,8 @@ UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_UPLOAD_BATCHES = 50
 MAX_FILES_PER_BATCH = 1000
 MAX_UPLOAD_START_BYTES = 1024 * 1024
-PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+HOST_LOGIN_LIFETIME = 60
+AUTH_GLOBAL_ATTEMPT_LIMIT = 50
 COOKIE_NAME = "clipshare_session"
 AUTH_ATTEMPT_WINDOW = 600
 AUTH_ATTEMPT_LIMIT = 10
@@ -330,7 +331,7 @@ AUTH_PAGE = r"""<!doctype html>
     <p>Enter the temporary session code shown in the ClipShare window on the host computer.</p>
     <form id="join">
       <label for="code">Session code</label>
-      <input id="code" name="code" autocomplete="one-time-code" autocapitalize="characters" required maxlength="14" autofocus>
+      <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9]{4}" autocomplete="one-time-code" required minlength="4" maxlength="4" placeholder="4-digit code" autofocus>
       <button id="submit" type="submit">Join session</button>
     </form>
     <div id="status" role="status" aria-live="polite"></div>
@@ -376,6 +377,8 @@ class ShareState:
         self.stored_bytes = 0
         self.sessions = set()
         self.auth_attempts = {}
+        self.global_auth_attempts = []
+        self.local_login_ticket = None
         self.auth_lock = threading.Lock()
 
 
@@ -409,12 +412,11 @@ def local_ip():
 
 
 def new_pairing_code():
-    raw = "".join(secrets.choice(PAIRING_ALPHABET) for _ in range(12))
-    return "-".join((raw[:4], raw[4:8], raw[8:]))
+    return f"{secrets.randbelow(10000):04d}"
 
 
 def normalize_pairing_code(value):
-    return "".join(character for character in value.upper() if character not in "- \t")
+    return value.strip()
 
 
 def create_session_token():
@@ -492,6 +494,28 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
+    def do_local_login(self, path):
+        """Redeem a one-use short-lived ticket only from host loopback."""
+        if self.client_address[0] != "127.0.0.1":
+            self.send_body(404, "text/plain; charset=utf-8", "Not found")
+            return
+        supplied = path.removeprefix("/_local_login/")
+        with self.state.auth_lock:
+            ticket = self.state.local_login_ticket
+            if ticket is None or time.monotonic() > ticket[1] or not hmac.compare_digest(supplied, ticket[0]):
+                self.send_body(404, "text/plain; charset=utf-8", "Login link expired. Reopen ClipShare from the desktop window.")
+                return
+            self.state.local_login_ticket = None
+            if len(self.state.sessions) >= MAX_SESSIONS:
+                self.send_body(429, "text/plain; charset=utf-8", "Device limit reached.")
+                return
+            token = create_session_token()
+            self.state.sessions.add(token)
+        cookie = f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict"
+        self.send_body(303, "text/plain; charset=utf-8", "", (
+            ("Set-Cookie", cookie), ("Location", "/"),
+        ))
+
     def do_auth(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -524,13 +548,18 @@ class Handler(BaseHTTPRequestHandler):
             attempts, first_attempt = self.state.auth_attempts.get(address, (0, now))
             if now - first_attempt >= AUTH_ATTEMPT_WINDOW:
                 attempts, first_attempt = 0, now
-            if attempts >= AUTH_ATTEMPT_LIMIT:
+            self.state.global_auth_attempts = [
+                attempt for attempt in self.state.global_auth_attempts
+                if now - attempt < AUTH_ATTEMPT_WINDOW
+            ]
+            if attempts >= AUTH_ATTEMPT_LIMIT or len(self.state.global_auth_attempts) >= AUTH_GLOBAL_ATTEMPT_LIMIT:
                 self.state.auth_attempts[address] = (attempts, first_attempt)
                 self.send_body(429, "application/json; charset=utf-8", '{"error":"Too many tries. Wait a few minutes and try again."}')
                 return
             expected = normalize_pairing_code(self.state.pairing_code)
             supplied = normalize_pairing_code(code)
             if not hmac.compare_digest(supplied, expected):
+                self.state.global_auth_attempts.append(now)
                 self.state.auth_attempts[address] = (attempts + 1, first_attempt)
                 self.send_body(401, "application/json; charset=utf-8", '{"error":"That session code did not match."}')
                 return
@@ -546,6 +575,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path.startswith("/_local_login/"):
+            self.do_local_login(path)
+            return
         if path == "/":
             page = PAGE if self.authorized() else AUTH_PAGE
             self.send_body(200, "text/html; charset=utf-8", page)
@@ -887,6 +919,13 @@ class ShareServer:
         self.thread = None
         self._stopped = False
         self._stop_lock = threading.Lock()
+
+    def local_login_url(self):
+        """Generate a one-use host-only URL, never for LAN sharing."""
+        ticket = create_session_token()
+        with self.state.auth_lock:
+            self.state.local_login_ticket = (ticket, time.monotonic() + HOST_LOGIN_LIFETIME)
+        return f"http://127.0.0.1:{self.port}/_local_login/{ticket}"
 
     def start(self):
         if self.thread is not None:
