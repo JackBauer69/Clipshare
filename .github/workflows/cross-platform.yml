@@ -190,7 +190,9 @@ jobs:
       - name: Build and test Debian/RPM packages
         if: matrix.platform == 'linux'
         env:
-          CLIPSHARE_MAINTAINER: ${{ vars.CLIPSHARE_MAINTAINER }}
+          # Noreply identity keeps CI packages valid without requiring a public
+          # personal email address. Owners can override via repository variables.
+          CLIPSHARE_MAINTAINER: ${{ vars.CLIPSHARE_MAINTAINER || 'ClipShare maintainers <191466601+JackBauer69@users.noreply.github.com>' }}
         run: |
           .build-venv/bin/python scripts/build_app.py
           .build-venv/bin/python scripts/check_linux_glibc.py build/frozen/ClipShare --maximum 2.35
@@ -228,51 +230,60 @@ jobs:
           retention-days: 30
 
   release:
-    name: Publish tagged release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    name: Publish Windows/Linux beta
+    # Only a deliberately marked merge commit publishes a beta.
+    # Future main pushes do not automatically create new releases.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[publish-windows-linux-beta]')
     needs: package
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v6
-      - name: Require the owner-selected source license
-        env:
-          CLIPSHARE_MAINTAINER: ${{ vars.CLIPSHARE_MAINTAINER }}
+      - name: Validate release licensing and version
+        shell: bash
         run: |
-          if [ ! -s LICENSE ]; then
-            echo "A source license must be selected before publishing a GitHub Release." >&2
-            exit 1
-          fi
-          if [ -z "$CLIPSHARE_MAINTAINER" ]; then
-            echo "Set the CLIPSHARE_MAINTAINER repository variable before publishing a release." >&2
-            exit 1
-          fi
-          if grep -Fq 'LicenseRef-ClipShare-Owner-Choice' packaging/linux/clipshare.spec; then
-            echo "Set the RPM License field to the owner-selected source license before publishing a release." >&2
-            exit 1
-          fi
+          set -euo pipefail
+          test -s LICENSE
+          grep -Fx 'License:        MIT' packaging/linux/clipshare.spec
+          test "$(PYTHONPATH=src python -c 'from clipshare import __version__; print(__version__)')" = '0.1.0'
+          test -s docs/releases/v0.1.0-beta.1.md
       - uses: actions/download-artifact@v7
         with:
           path: artifacts
           pattern: clipshare-*
           merge-multiple: true
-      - name: Verify tag and macOS distribution readiness
-        env:
-          TAG_NAME: ${{ github.ref_name }}
+      - name: Verify installers and generate SHA256 checksums
+        shell: bash
         run: |
-          version="$(PYTHONPATH=src python -c 'from clipshare import __version__; print(__version__)')"
-          test "$TAG_NAME" = "v$version"
-          for arch in x64 arm64; do
-            status="artifacts/ClipShare-$version-macos-$arch.signing.txt"
-            test -f "$status"
-            grep -Fx 'APP_SIGNED=true' "$status"
-            grep -Fx 'INSTALLER_SIGNED=true' "$status"
-            grep -Fx 'NOTARIZED=true' "$status"
-          done
-      - name: Create GitHub Release
+          set -euo pipefail
+          shopt -s nullglob
+          windows=(artifacts/ClipShare-0.1.0-windows-x64-setup.exe)
+          debian=(artifacts/clipshare_0.1.0_amd64.deb)
+          fedora=(artifacts/clipshare-0.1.0-1*.rpm)
+          test -f "${windows[0]}"
+          test -f "${debian[0]}"
+          test "${#fedora[@]}" -eq 1
+          test -f "${fedora[0]}"
+          (cd artifacts && sha256sum "${windows[0]##*/}" "${debian[0]##*/}" "${fedora[0]##*/}" > SHA256SUMS)
+      - name: Publish release v0.1.0-beta.1
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG_NAME" artifacts/*.exe artifacts/*.pkg artifacts/*.deb artifacts/*.rpm --title "$TAG_NAME" --generate-notes
+          set -euo pipefail
+          tag="v0.1.0-beta.1"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to overwrite published assets."
+            exit 1
+          fi
+          gh release create "$tag" \
+            artifacts/ClipShare-0.1.0-windows-x64-setup.exe \
+            artifacts/clipshare_0.1.0_amd64.deb \
+            artifacts/clipshare-0.1.0-1*.rpm \
+            artifacts/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "ClipShare v0.1.0-beta.1 (Windows/Linux)" \
+            --notes-file docs/releases/v0.1.0-beta.1.md \
+            --prerelease --latest=false
