@@ -74,7 +74,11 @@ RPM requirements were inspected with `rpm -qp --requires` and `--provides`. The 
 
 `.github/workflows/cross-platform.yml` runs the tests on Windows x64, Ubuntu 22.04 x64, macOS 15 Intel, and macOS 15 Apple Silicon using Python 3.12. Linux package creation is a deliberate exception: on Ubuntu 22.04 it uses system Python 3.10 and system Tcl/Tk, enforces a GLIBC 2.35 maximum, and smoke-tests the extracted `.deb` on that baseline. It also installs and smoke-tests the `.rpm` in Fedora 45. Windows and macOS use native Python 3.12 builds. GitHub Actions run [#42560420432](https://github.com/JackBauer69/clipshare/actions/runs/42560420432) passed all eight tests/package jobs. The owner installed the resulting `.deb` on Kali Linux and verified real sharing, and installed the Windows `.exe` successfully in a Windows VM. These results do not replace manual validation of Windows text/file sharing or Windows uninstall/reinstall, nor macOS installation, UI, and network testing.
 
-A tag matching the package version (`v0.1.0` for the current version) triggers a release job. ClipShare's original source code uses the MIT License (`LICENSE`), and RPM metadata declares `MIT`. The release job also requires a public `CLIPSHARE_MAINTAINER` repository variable in the form `ClipShare Team <team@example.org>` and signed/notarized macOS packages; it fails without them. Do not create or push a tag as part of ordinary development.
+The Windows/Linux **v0.1.0-beta.1** release is intentionally triggered by a single merge commit message containing `[publish-windows-linux-beta]` on `main`. The publishing job waits for all test and package jobs, validates that `LICENSE` and the RPM MIT metadata are present and that the application version is `0.1.0`, and uploads only the Windows installer, Linux Debian and RPM packages, and `SHA256SUMS`. The GitHub CLI creates the `v0.1.0-beta.1` tag at that exact merge commit if it doesn't already exist. It publishes a **prerelease**, not a final stable release. Future ordinary pushes to `main` do not publish releases; the existing release won't be overwritten.
+
+The Linux packaging job uses the non-secret GitHub Actions variable `CLIPSHARE_MAINTAINER` if set. Otherwise it uses the repository owner's GitHub noreply identity as its packaging metadata contact, rather than a fictitious `.invalid` address. A project support email can be added later. Windows code signing is optional for this beta; macOS signing and notarization remain required before separately distributing macOS packages.
+
+The repository is private until the owner explicitly makes it public. A GitHub Release in a private repository is **not** publicly downloadable. GitHub account administration rights are needed to change repository visibility, which also makes the repository source history and Actions history public.
 
 Configure these as protected repository Actions secrets only when signing credentials are available:
 
@@ -85,19 +89,15 @@ No certificate, password, API key, or token belongs in source control. Without t
 
 For Linux package metadata, set the non-secret `CLIPSHARE_MAINTAINER` repository variable before release. Development builds use an explicit `.invalid` placeholder until the owner supplies the project contact.
 
-## First public release checklist
+## First public Windows/Linux beta release checklist
 
-The repository remains private and no official public release has been published. Before publishing `v0.1.0`:
+1. MIT license and third-party notices are included; the RPM License field is `MIT`.
+2. The Windows installer has been manually installed and the convenient pairing workflow tested in a Windows VM; Kali Linux installation and real-device sharing have been verified.
+3. Verify all four platform test jobs and four packaging jobs pass on the release PR and release merge commit. macOS installers are built in CI only and not uploaded to the beta.
+4. Verify GitHub Release `v0.1.0-beta.1` has exactly the Windows `.exe`, Linux `.deb` and `.rpm`, and `SHA256SUMS`, with matching release notes and commit tag.
+5. The owner makes the repository public via GitHub Settings only after considering that all source code, Git history, and Actions logs become public.
 
-1. Confirm that `main` remains the default branch (completed November 2026).
-2. ClipShare original source code uses the MIT License (`LICENSE`) and its RPM package metadata declares `MIT`. Maintain required notices for third-party components and review distributor obligations.
-3. Set the non-secret `CLIPSHARE_MAINTAINER` repository Actions variable to a real project contact.
-4. Complete Windows VM validation for pairing, file/text sharing, uninstall/reinstall, stop/restart, and cleanup; confirm equivalent macOS behavior on supported machines. Kali Linux installation and actual sharing and Windows VM installation have been verified.
-5. Configure macOS Developer ID signing and notarization. The tag-triggered release job deliberately refuses to publish unsigned or unnotarized macOS installers.
-6. Decide whether to sign Windows installers to reduce SmartScreen prompts, review release notes and supported-OS claims, and ensure no secrets or personal files are in the repository.
-7. Only after these gates are met, deliberately create and push the `v0.1.0` tag and confirm the official GitHub Release contains the correct installers.
-
-Ordinary pull requests and CI build artifacts are not public releases. Do not bypass the release workflow's licensing/signing checks to publish early.
+Later: configure Apple Developer ID signing/notarization and manual validation before including macOS binaries in another release. Windows Authenticode code signing can be added to reduce SmartScreen warnings.
 
 ## Support matrix and adding targets
 
@@ -107,4 +107,4 @@ To add an OS or architecture, add a native hosted runner to both test and packag
 
 ## Licensing and distribution notes
 
-The bundle includes Python, Tcl/Tk, and PyInstaller license texts under `third_party_licenses/`. PyInstaller's bootloader exception permits distributing bundled applications. ClipShare's original source code is distributed under the MIT License in `LICENSE`; `LICENSING.md` summarizes that grant. RPM metadata uses `License: MIT`, and bundled third-party license obligations continue to apply. Release CI checks that a nonempty `LICENSE` file exists and that the previous RPM license placeholder is absent. NSIS and Linux package tools are build-time dependencies, not installed runtime components.
+The bundle includes Python, Tcl/Tk, and PyInstaller license texts under `third_party_licenses/`. PyInstaller's bootloader exception permits distributing bundled applications. ClipShare's original source code is distributed under the MIT License in `LICENSE`; `LICENSING.md` summarizes that grant. RPM metadata uses `License: MIT`, and bundled third-party license obligations continue to apply. Release CI checks that a nonempty `LICENSE` file exists, that RPM metadata is `MIT`, and that the requested beta version matches the application version. NSIS and Linux package tools are build-time dependencies, not installed runtime components.
