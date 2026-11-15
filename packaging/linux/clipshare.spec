@@ -3,7 +3,7 @@ Name:           clipshare
 Version:        %{clipshare_version}
 Release:        1%{?dist}
 Summary:        Temporary local-network text and file sharing
-License:        LicenseRef-ClipShare-Owner-Choice
+License:        MIT
 Packager:       %{clipshare_maintainer}
 Source0:        clipshare-bundle.tar.gz
 Source1:        clipshare.desktop
