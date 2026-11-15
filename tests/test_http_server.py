@@ -342,13 +342,13 @@ class ClipShareHTTPTests(unittest.TestCase):
     def test_stop_and_restart_creates_a_fresh_temporary_session(self):
         first = clipboard_share.ShareServer(host="127.0.0.1", port=0).start()
         first_storage = Path(first.state.storage_root)
-        first_code = first.state.pairing_code
         first.stop()
         self.assertFalse(first_storage.exists())
 
         second = clipboard_share.ShareServer(host="127.0.0.1", port=0).start()
         try:
-            self.assertNotEqual(second.state.pairing_code, first_code)
+            # A random four-digit PIN can coincidentally repeat across sessions.
+            self.assertRegex(second.state.pairing_code, r"^[0-9]{4}$")
             with urlopen(f"http://127.0.0.1:{second.port}/", timeout=5) as response:
                 self.assertEqual(response.status, 200)
                 self.assertIn(b"Join ClipShare", response.read())
